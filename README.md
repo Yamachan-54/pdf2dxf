@@ -3,7 +3,39 @@
 PDFに含まれるベクター図形を、CADで読み込めるASCII DXFへ変換するコマンドラインツールです。
 線、矩形、四辺形、3次ベジェ曲線に対応し、ページごとにDXFレイヤーを作ります。
 
-## インストール
+## Windowsへのインストール（Python不要）
+
+64-bit版Windows 10/11に対応しています。プロジェクト一式をZIPから展開し、
+`install-windows.cmd` をダブルクリックしてください。管理者権限は不要です。
+
+インストーラーは次の処理を自動で行います。
+
+- 専用の組み込みPythonを `%LOCALAPPDATA%\Programs\pdf2dxf` に配置
+- PyMuPDFをダウンロードしてSHA-256を検証
+- `pdf2dxf` コマンドをユーザーPATHへ追加
+- 既存のシステムPython環境には一切変更を加えない
+
+完了後、新しいコマンドプロンプトまたはPowerShellを開いて実行します。
+
+```powershell
+pdf2dxf input.pdf output.dxf
+```
+
+PowerShellからインストール先を指定する場合は次のように実行できます。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -InstallDir "D:\Tools\pdf2dxf"
+```
+
+PATHへ追加しない場合は `-NoPath` を指定します。アンインストールは次のコマンドです。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\pdf2dxf\uninstall-windows.ps1"
+```
+
+インストール時にPython本体とPyMuPDFを取得するため、インターネット接続が必要です。
+
+## Python環境がある場合のインストール
 
 Python 3.10以上が必要です。
 
@@ -51,4 +83,3 @@ pdf2dxf drawing.pdf --curve-steps 48
 ```bash
 python -m unittest discover -s tests -v
 ```
-
