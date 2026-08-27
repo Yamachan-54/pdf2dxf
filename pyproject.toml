@@ -4,16 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdf2dxf"
-version = "0.1.0"
-description = "Convert vector drawings in PDF files to DXF"
+version = "0.3.0"
+description = "Interpret vector PDF drawings as structured, editable DXF"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-dependencies = ["PyMuPDF>=1.24,<2"]
+dependencies = ["PyMuPDF>=1.24,<2", "ezdxf>=1.4.4,<2"]
 
 [project.scripts]
 pdf2dxf = "pdf2dxf.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["pdf2dxf*"]
-

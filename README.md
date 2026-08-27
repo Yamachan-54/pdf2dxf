@@ -1,7 +1,24 @@
 # pdf2dxf
 
-PDFに含まれるベクター図形を、CADで読み込めるASCII DXFへ変換するコマンドラインツールです。
-線、矩形、四辺形、3次ベジェ曲線に対応し、ページごとにDXFレイヤーを作ります。
+PDF図面を解析し、CADで再編集できる構造化ASCII DXFへ変換するコマンドラインツールです。
+電子PDFのネイティブ図形・文字をDrawing IRへ取り込み、解析、プリミティブ復元、意味分類、
+CAD Model生成、DXF出力を独立した段階で処理します。
+DXFのシリアライズ、Layer、LineType、Text Style、Dimension Style管理には
+`ezdxf`を使用し、Drawing IRとCAD Modelはezdxfに依存しません。
+
+現在は次に対応しています。
+
+- 直線を `LINE`、閉じた円形ベジェを `CIRCLE`、円弧を `ARC` として復元
+- 復元できない曲線を安全に `LWPOLYLINE` へフォールバック
+- PDFネイティブ文字を `TEXT`（CAD Model/DXF Exporterは `MTEXT` にも対応）として保持
+- 連続する同一直線上の短い線を1本の `LINE` へ統合
+- Drawing IR、Sheet、View、Feature、Dimension、Constraintの拡張可能なデータモデル
+- 図面外枠・表題欄候補を製品形状と分離
+- 意味とViewを分離し、意味をDXFレイヤーへ出力時にマッピング
+- 解決済みの線形寸法をネイティブ `DIMENSION` として出力
+- `CadExporter`境界とCAD Entity単位のezdxf Handler
+
+詳しい現状分析と設計は [docs/architecture.md](docs/architecture.md) を参照してください。
 
 ## Windowsへのインストール（Python不要）
 
@@ -11,7 +28,7 @@ PDFに含まれるベクター図形を、CADで読み込めるASCII DXFへ変�
 インストーラーは次の処理を自動で行います。
 
 - 専用の組み込みPythonを `%LOCALAPPDATA%\Programs\pdf2dxf` に配置
-- PyMuPDFをダウンロードしてSHA-256を検証
+- PyMuPDF、ezdxfと必須依存をダウンロードしてSHA-256を検証
 - `pdf2dxf` コマンドをユーザーPATHへ追加
 - 既存のシステムPython環境には一切変更を加えない
 
@@ -33,7 +50,7 @@ PATHへ追加しない場合は `-NoPath` を指定します。アンインス�
 powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\pdf2dxf\uninstall-windows.ps1"
 ```
 
-インストール時にPython本体とPyMuPDFを取得するため、インターネット接続が必要です。
+インストール時にPython本体、PyMuPDF、ezdxfと必須依存を取得するため、インターネット接続が必要です。
 
 ## Python環境がある場合のインストール
 
@@ -63,18 +80,62 @@ pdf2dxf drawing.pdf --unit inch
 # 全体を2倍し、ページを縦に並べる
 pdf2dxf drawing.pdf --scale 2 --layout vertical --page-gap 20
 
-# 曲線を固定精度でポリライン化
+# 曲線フィッティング/フォールバック時のサンプリング数を固定
 pdf2dxf drawing.pdf --curve-steps 48
+
+# 変換途中のDrawing IRをJSONで保存
+pdf2dxf drawing.pdf output.dxf --dump-ir drawing-ir.json
+
+# 抽出・再構築・意味解析のデバッグJSONを保存
+pdf2dxf drawing.pdf output.dxf --debug debug
 ```
 
-主なオプションは `pdf2dxf --help` で確認できます。既定の出力単位はmmで、PDFの1 ptを正確に `25.4 / 72 mm` として換算します。複数ページは既定で横に並び、各ページは `PDF_PAGE_1` のようなレイヤーに分かれます。
+主なオプションは `pdf2dxf --help` で確認できます。既定の出力単位はmmで、PDFの1 ptを正確に `25.4 / 72 mm` として換算します。複数ページは既定で横に並びます。ページ番号とViewはDrawing IR属性であり、DXFレイヤーとは分離されています。
+
+## DXFレイヤー
+
+Drawing IRの `semantic_type` は、DXF出力時に次のレイヤーへマッピングされます。
+
+| DXF Layer | 内容 |
+| --- | --- |
+| `GEOMETRY` | 外形、内形、穴、形状線 |
+| `HIDDEN` | 隠れ線 |
+| `CENTER` | 中心線 |
+| `DIMENSION` | 寸法、寸法線、寸法補助線 |
+| `TEXT` | 通常文字、注記 |
+| `HATCH` | ハッチング |
+| `REFERENCE` | 図面枠、表題欄、補助図形、未確定要素 |
+
+図面枠と表題欄候補は削除せずDrawing IRに保持し、`GEOMETRY`には混在させません。
+
+`CENTER` Layerには `CENTER` LineType、`HIDDEN` Layerには `HIDDEN` LineTypeを
+定義します。個々のEntityは `BYLAYER`を使用します。線種作成に失敗した場合は
+`Continuous`へ安全にフォールバックします。
+
+DXF Versionは広い互換性とネイティブEntity対応のバランスからR2000
+（`AC1015`）を既定値として一元管理しています。
+
+## Debug出力
+
+`--debug [DIR]` は現在の電子PDF処理について次を出力します。
+
+- `extracted_ir.json`: PDFから抽出直後
+- `reconstruction.json`: 円・円弧・連続線の再構築後
+- `semantic_entities.json`: 意味、View、Confidenceの一覧
+- `drawing_ir.json`: 最終Drawing IR
+- `dxf_export.json`: IR ID、CAD型、DXF型、Layer、LineType、Handle、出力状態の対応
+
+ラスター検出用のページ画像や検出オーバーレイは、Raster Parser実装時に同じディレクトリへ追加する予定です。
 
 ## 制限事項
 
-- PDF内のベクターパスを変換します。スキャン画像や写真の輪郭抽出（ラスターの自動トレース）は行いません。
-- 文字はDXF文字へ変換しません。文字がPDF内でアウトライン化されていればパスとして変換されます。
+- 現在は電子PDFのベクター/ネイティブ文字を対象とします。スキャン画像のOpenCV解析やOCRはまだ実装していません。
+- アウトライン化された文字はネイティブ文字として取得できません。将来のOCR Adapterへ接続する構造のみ用意しています。
 - 塗りつぶし、線種、線幅、クリッピングマスクはDXFへ保持せず、輪郭線を出力します。
-- ベジェ曲線はCAD互換性を優先して短いLINEエンティティへ近似します。
+- 意味分類は保守的な初期ルールです。投影図種別、寸法解釈、View間Feature対応、Constraint Solverは今後のPhaseです。
+- 定義点と寸法線位置が揃った線形寸法だけをネイティブ `DIMENSION`へ変換します。情報不足の寸法は誤ったEntityを作らず、`dxf_export.json`へ `unresolved`として記録します。
+- HATCH、BLOCK、INSERTのIR/CAD Modelは未実装です。ExporterのEntity Handler登録へ追加できる構造です。
+- 円/円弧フィッティングが閾値を満たさないベジェは、誤認識を避けて `LWPOLYLINE` として残します。
 
 ## テスト
 
@@ -83,3 +144,8 @@ pdf2dxf drawing.pdf --curve-steps 48
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+テストでは生成した電子PDFを使い、LINE、CIRCLE、ARC、TEXT、MTEXT、DIMENSION、
+意味レイヤー、CENTER/HIDDEN LineType、mm/inch/pt単位、図面枠/表題欄分離、
+Drawing IR JSON、Debug出力、既存CLI互換性を検証します。DXFはezdxfで再読込し、
+監査とEntity単位のラウンドトリップ検証を行います。

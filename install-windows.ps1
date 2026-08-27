@@ -13,6 +13,11 @@ $PythonVersion = "3.13.15"
 $PythonArchiveUrl = "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-embed-amd64.zip"
 $PythonArchiveSha256 = "d1f04d990aee1253d8569e8e5104e30fa9f5fa830899f14843448872d936a2cf"
 $PyMuPDFVersion = "1.28.2"
+$EzdxfVersion = "1.4.4"
+$NumpyVersion = "2.5.2"
+$FontToolsVersion = "4.63.0"
+$PyParsingVersion = "3.3.2"
+$TypingExtensionsVersion = "4.16.0"
 $PackageSource = Join-Path $PSScriptRoot "pdf2dxf"
 $StageDir = "$InstallDir.installing-$PID"
 $BackupDir = "$InstallDir.backup-$PID"
@@ -48,6 +53,26 @@ function Add-UserPathEntry {
         $NewValue = (@($Entries) + $Directory) -join ";"
         [Environment]::SetEnvironmentVariable("Path", $NewValue, "User")
     }
+}
+
+function Install-PyPiWheel {
+    param(
+        [Parameter(Mandatory = $true)][string]$Project,
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][string]$WheelPattern,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $Metadata = Invoke-RestMethod -UseBasicParsing -Uri "https://pypi.org/pypi/$Project/$Version/json"
+    $Wheel = $Metadata.urls | Where-Object {
+        $_.packagetype -eq "bdist_wheel" -and $_.filename -match $WheelPattern
+    } | Select-Object -First 1
+    if (-not $Wheel) {
+        throw "A compatible $Project $Version wheel was not found."
+    }
+    $WheelZip = Join-Path $DownloadDir "$Project-$Version-wheel.zip"
+    Get-FileChecked -Uri $Wheel.url -Destination $WheelZip -Sha256 $Wheel.digests.sha256
+    Expand-Archive -LiteralPath $WheelZip -DestinationPath $Destination -Force
 }
 
 if ($env:OS -ne "Windows_NT") {
@@ -86,17 +111,13 @@ try {
     $SitePackages = Join-Path $RuntimeDir "Lib\site-packages"
     New-Item -ItemType Directory -Path $SitePackages -Force | Out-Null
 
-    Write-Host "[3/5] Downloading PyMuPDF..."
-    $Metadata = Invoke-RestMethod -UseBasicParsing -Uri "https://pypi.org/pypi/PyMuPDF/$PyMuPDFVersion/json"
-    $Wheel = $Metadata.urls | Where-Object {
-        $_.packagetype -eq "bdist_wheel" -and $_.filename -match "-cp3[0-9]+-abi3-win_amd64\.whl$"
-    } | Select-Object -First 1
-    if (-not $Wheel) {
-        throw "A compatible PyMuPDF Windows wheel was not found."
-    }
-    $WheelZip = Join-Path $DownloadDir "pymupdf-wheel.zip"
-    Get-FileChecked -Uri $Wheel.url -Destination $WheelZip -Sha256 $Wheel.digests.sha256
-    Expand-Archive -LiteralPath $WheelZip -DestinationPath $SitePackages -Force
+    Write-Host "[3/5] Downloading PyMuPDF, ezdxf, and runtime dependencies..."
+    Install-PyPiWheel -Project "PyMuPDF" -Version $PyMuPDFVersion -WheelPattern "-cp3[0-9]+-abi3-win_amd64\.whl$" -Destination $SitePackages
+    Install-PyPiWheel -Project "ezdxf" -Version $EzdxfVersion -WheelPattern "^ezdxf-$EzdxfVersion-py3-none-any\.whl$" -Destination $SitePackages
+    Install-PyPiWheel -Project "numpy" -Version $NumpyVersion -WheelPattern "^numpy-$NumpyVersion-cp313-cp313-win_amd64\.whl$" -Destination $SitePackages
+    Install-PyPiWheel -Project "fonttools" -Version $FontToolsVersion -WheelPattern "^fonttools-$FontToolsVersion-(cp313-cp313-win_amd64|py3-none-any)\.whl$" -Destination $SitePackages
+    Install-PyPiWheel -Project "pyparsing" -Version $PyParsingVersion -WheelPattern "^pyparsing-$PyParsingVersion-py3-none-any\.whl$" -Destination $SitePackages
+    Install-PyPiWheel -Project "typing_extensions" -Version $TypingExtensionsVersion -WheelPattern "^typing_extensions-$TypingExtensionsVersion-py3-none-any\.whl$" -Destination $SitePackages
 
     Write-Host "[4/5] Installing pdf2dxf..."
     Copy-Item -LiteralPath $PackageSource -Destination $SitePackages -Recurse -Force

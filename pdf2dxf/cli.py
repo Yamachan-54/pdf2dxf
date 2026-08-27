@@ -26,6 +26,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--page-gap", type=float, default=10.0, help="ページ間隔（出力単位）")
     parser.add_argument("--curve-steps", type=int, help="ベジェ曲線1本あたりの分割数")
+    parser.add_argument("--dump-ir", type=Path, help="Drawing IRをJSONへ保存")
+    parser.add_argument(
+        "--debug",
+        nargs="?",
+        const=Path("debug"),
+        type=Path,
+        metavar="DIR",
+        help="解析途中のJSONを保存（保存先省略時: ./debug）",
+    )
     parser.add_argument("--version", action="version", version=__version__)
     return parser
 
@@ -76,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
             layout=args.layout,
             page_gap=args.page_gap,
             curve_steps=args.curve_steps,
+            dump_ir=args.dump_ir,
+            debug_dir=args.debug,
         )
     except ConversionError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -93,4 +104,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
