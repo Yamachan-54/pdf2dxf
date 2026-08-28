@@ -4,10 +4,11 @@ import csv
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
-from typing import Iterable, Protocol
+from typing import Any, Iterable, Protocol
 
 from ..geometry import Point
 from ..ir.drawing import Drawing, Sheet
@@ -105,6 +106,15 @@ class TesseractOcrAdapter:
                         result.stdout, page_number=page_number, sheet=sheet,
                         image_width=pixmap.width, image_height=pixmap.height,
                     )
+                    recovered = self._recover_square_dimension_words(
+                        result.stdout, page=page, zoom=zoom,
+                        matrix=pymupdf.Matrix(zoom, zoom),
+                        temporary=temporary, executable=executable,
+                        page_number=page_number, sheet=sheet,
+                        image_width=pixmap.width, image_height=pixmap.height,
+                        first_entity_number=len(entities) + 1,
+                    )
+                    entities.extend(recovered)
                     drawing.entities.extend(entities)
                     added += len(entities)
                     processed_pages.append(page_number)
@@ -196,9 +206,145 @@ class TesseractOcrAdapter:
             )
         return entities
 
+    def _recover_square_dimension_words(
+        self,
+        tsv: str,
+        *,
+        page: Any,
+        zoom: float,
+        matrix: Any,
+        temporary: Path,
+        executable: str,
+        page_number: int,
+        sheet: Sheet,
+        image_width: int,
+        image_height: int,
+        first_entity_number: int,
+    ) -> list[Entity]:
+        """Retry low-confidence square-dimension candidates one line at a time."""
+        rows = list(csv.DictReader(StringIO(tsv), delimiter="\t"))
+        line_rows = {
+            _ocr_line_key(row): row for row in rows if row.get("level") == "4"
+        }
+        candidates: dict[tuple[str, str, str], dict[str, str]] = {}
+        for row in rows:
+            if row.get("level") != "5":
+                continue
+            text = (row.get("text") or "").strip()
+            try:
+                confidence = float(row.get("conf", "-1"))
+            except ValueError:
+                continue
+            if (
+                confidence >= self.config.minimum_confidence
+                or not re.fullmatch(r"0[0-9.,]{3,}", text)
+            ):
+                continue
+            candidates.setdefault(_ocr_line_key(row), row)
+
+        sx0, sy0, sx1, sy1 = sheet.bbox
+        scale_x = (sx1 - sx0) / image_width
+        scale_y = (sy1 - sy0) / image_height
+        minimum_retry_confidence = max(50.0, self.config.minimum_confidence - 20.0)
+        recovered: list[Entity] = []
+        for retry_index, (line_key, original_row) in enumerate(candidates.items(), 1):
+            line = line_rows.get(line_key)
+            if line is None:
+                continue
+            try:
+                line_left = int(line.get("left", "0"))
+                line_top = int(line.get("top", "0"))
+                line_width = int(line.get("width", "0"))
+                line_height = int(line.get("height", "0"))
+            except ValueError:
+                continue
+            padding = max(10, int(line_height * 0.35))
+            crop_left = max(0, line_left - padding)
+            crop_top = max(0, line_top - padding)
+            crop_right = min(image_width, line_left + line_width + padding)
+            crop_bottom = min(image_height, line_top + line_height + padding)
+            if crop_right <= crop_left or crop_bottom <= crop_top:
+                continue
+            clip = page.rect.__class__(
+                crop_left / zoom, crop_top / zoom,
+                crop_right / zoom, crop_bottom / zoom,
+            )
+            crop = page.get_pixmap(
+                matrix=matrix, clip=clip, alpha=False,
+            )
+            if crop.width <= 0 or crop.height <= 0:
+                continue
+            crop_path = temporary / f"page-{page_number:04d}-line-{retry_index:04d}.png"
+            crop.save(crop_path)
+            result = subprocess.run(
+                [
+                    executable, str(crop_path), "stdout", "-l",
+                    self.config.language, "--psm", "7", "tsv",
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            if result.returncode != 0:
+                continue
+            matches = []
+            for row in csv.DictReader(StringIO(result.stdout), delimiter="\t"):
+                text = (row.get("text") or "").strip()
+                try:
+                    confidence = float(row.get("conf", "-1"))
+                    left = crop_left + int(row.get("left", "0"))
+                    top = crop_top + int(row.get("top", "0"))
+                    width = int(row.get("width", "0"))
+                    height = int(row.get("height", "0"))
+                except ValueError:
+                    continue
+                if (
+                    row.get("level") == "5"
+                    and confidence >= minimum_retry_confidence
+                    and re.fullmatch(r"0[1-9][0-9]{2,}(?:[.,][0-9]+)?", text)
+                    and width > 0 and height > 0
+                ):
+                    matches.append((text, confidence, left, top, width, height))
+            if len(matches) != 1:
+                continue
+            text, confidence, left, top, width, height = matches[0]
+            entity_number = first_entity_number + len(recovered)
+            recovered.append(
+                Entity(
+                    f"OCR_P{page_number:03d}_{entity_number:05d}", "text",
+                    TextGeometry(
+                        text,
+                        Point(sx0 + left * scale_x, sy1 - (top + height) * scale_y),
+                        height * scale_y, width=width * scale_x,
+                    ),
+                    SemanticType.TEXT, confidence=confidence / 100.0,
+                    source=SourceEvidence(
+                        "tesseract_ocr", page_number,
+                        _integer(original_row.get("block_num")),
+                        _integer(original_row.get("word_num")),
+                        "ocr_word_line_retry",
+                    ),
+                    style=Style(), page=page_number,
+                    metadata={
+                        "ocr_language": self.config.language,
+                        "ocr_confidence": confidence,
+                        "pixel_bbox": [left, top, width, height],
+                        "line_num": _integer(original_row.get("line_num")),
+                        "ocr_recovery": "line_psm_7",
+                        "first_pass_text": (original_row.get("text") or "").strip(),
+                    },
+                )
+            )
+        return recovered
+
 
 def _integer(value: str | None) -> int | None:
     try:
         return int(value) if value is not None else None
     except ValueError:
         return None
+
+
+def _ocr_line_key(row: dict[str, str]) -> tuple[str, str, str]:
+    return (
+        row.get("block_num", ""), row.get("par_num", ""),
+        row.get("line_num", ""),
+    )

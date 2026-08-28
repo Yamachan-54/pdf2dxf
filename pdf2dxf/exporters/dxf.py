@@ -67,7 +67,9 @@ def safe_layer_name(name: str) -> str:
     return cleaned or "0"
 
 
-def _dimension_text(value: float | None) -> str:
+def _dimension_text(value: float | None, display_text: str | None) -> str:
+    if display_text:
+        return display_text
     return "<>" if value is None else format(value, ".12g")
 
 
@@ -226,7 +228,7 @@ class _EntityWriter:
             base=(entity.dimension_line_point.x, entity.dimension_line_point.y),
             p1=(entity.first_point.x, entity.first_point.y),
             p2=(entity.second_point.x, entity.second_point.y),
-            text=_dimension_text(entity.value),
+            text=_dimension_text(entity.value, entity.display_text),
             angle=entity.angle,
             dimstyle=self.config.dimension_style,
             override={"dimlfac": entity.measurement_scale},

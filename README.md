@@ -17,6 +17,8 @@ DXFのシリアライズ、Layer、LineType、Text Style、Dimension Style管理
 - ペアになった小円端点と接続線から寸法図形を検出し、加工穴・加工線と分離
 - 任意のTesseract OCR Adapterでアウトライン文字から編集可能なTEXTを追加
 - 寸法図形近傍のOCR数値・変数を `dimension_text` としてDIMENSIONへ分離
+- 複数の寸法OCR文字を主寸法・括弧内参考値・曖昧文字へ保守的に分類
+- `□`を先頭の`0`と誤認した正方形寸法を正規化し、低信頼度候補は行単位OCRで再試行
 - ゼロ長 `LINE` を除外し、除外数をDrawing IRの再構成統計へ記録
 - Drawing IR、Sheet、View、Feature、Dimension、Constraintの拡張可能なデータモデル
 - 図面外枠・全高セパレータ付き表題欄を製品形状と分離
@@ -124,6 +126,9 @@ OCRは明示的に `--ocr` を指定した場合だけ実行します。既定�
 ネイティブ文字が存在するページは重複防止のためスキップします。`eng`だけでも数字・英字の
 寸法を取得できますが、日本語全文にはTesseractの`jpn`言語データが必要です。
 実行ファイルがPATHにない場合は`--tesseract-command`でパスを指定できます。
+寸法近傍で`0`に続く3桁以上の値が得られた場合は、元OCR文字列をmetadataへ保持したまま
+正方形寸法記号`□`へ正規化します。低信頼度候補は該当行だけをPSM 7で再認識し、
+明確な数値が1つ得られた場合だけ追加します。
 
 ## DXFレイヤー
 
@@ -171,7 +176,8 @@ DXF Versionは広い互換性とネイティブEntity対応のバランスから
 - 両側の定義点と単一の数値文字が揃った線形寸法をネイティブ `DIMENSION`へ変換します。等倍寸法は単独で、縮尺寸法は同一View内の独立した2寸法以上が同じ標準倍率を1%以内で支持した場合だけ昇格します。
 - 推定倍率は中立なCAD Model属性として保持し、DXF Exporter境界でezdxfの`DIMLFAC`へ変換します。情報不足・縮尺不明の寸法はDrawing IRの`dimension_analysis.unresolved_reasons`へ理由を記録します。現在の自動縮尺推定は主要用途のmm出力に限定しています。
 - 文字値を復元できない寸法図形でも、同径小円のペア、点間の線、直交する補助線をそれぞれ `dimension_marker`、`dimension_line`、`dimension_extension_line` としてDrawing IRに保持し、`DIMENSION` Layerへ分離します。この段階では推測したネイティブ `DIMENSION` Entityにはしません。
-- OCR文字が寸法図形の近傍にあり、数値・直径記号・`W2`等の限定パターンに一致する場合は`dimension_text`へ分類します。分割OCR文字は誤結合せず未解決のまま残します。
+- OCR文字が寸法図形の近傍にあり、数値・直径記号・`W2`等の限定パターンに一致する場合は`dimension_text`へ分類します。同一基線上で主寸法の後に完全な括弧対が並ぶ場合だけ`primary`と`reference`へ分け、それ以外の複数トークンは`ambiguous`として誤結合しません。
+- `□`補正は寸法図形の近傍にある`0`＋3桁以上のOCR文字だけを対象とします。行再OCRでも数値、小数点、信頼度の条件を満たさない場合は推測補正しません。
 - Git不要Windowsインストーラーは、利用者が指定した64-bit Tesseractバンドルを検証して自己完結インストールへ取り込めます。Tesseract配布物自体はリポジトリに同梱しません。
 - HATCH、BLOCK、INSERTのIR/CAD Modelは未実装です。ExporterのEntity Handler登録へ追加できる構造です。
 - 円/円弧フィッティングが閾値を満たさないベジェは、誤認識を避けて `LWPOLYLINE` として残します。
@@ -186,6 +192,6 @@ python -m unittest discover -s tests -v
 
 テストでは生成した電子PDFを使い、LINE、CIRCLE、ARC、TEXT、MTEXT、DIMENSION、
 意味レイヤー、CENTER/HIDDEN LineType、mm/inch/pt単位、図面枠/表題欄分離、
-回転ページ座標、ゼロ長線除外、分割中心線、寸法図形と加工形状の分離、View縮尺付きネイティブ寸法昇格、OCR座標変換・信頼度フィルター、高密度View分離、
+回転ページ座標、ゼロ長線除外、分割中心線、寸法図形と加工形状の分離、View縮尺付きネイティブ寸法昇格、OCR座標変換・信頼度フィルター、寸法文字役割分類、高密度View分離、
 Drawing IR JSON、Debug出力、既存CLI互換性を検証します。DXFはezdxfで再読込し、
 監査とEntity単位のラウンドトリップ検証を行います。

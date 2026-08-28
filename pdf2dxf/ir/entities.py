@@ -97,6 +97,7 @@ class DimensionGeometry:
     dimension_line_point: Point | None = None
     angle: float = 0.0
     measurement_scale: float = 1.0
+    display_text: str | None = None
 
 
 Geometry = (

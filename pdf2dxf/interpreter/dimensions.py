@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import hypot
 import re
 
@@ -120,6 +120,7 @@ class DimensionInterpreter:
         dimension_texts = self._associate_dimension_texts(
             drawing, groups, by_id, page_scales
         )
+        text_roles = self._assign_dimension_text_roles(drawing, groups)
         drawing.metadata["dimension_groups"] = [
             {
                 "id": group_id,
@@ -139,6 +140,7 @@ class DimensionInterpreter:
             "dimension_line_entities": len(dimension_lines),
             "extension_line_entities": len(extension_lines),
             "dimension_text_entities": dimension_texts,
+            "dimension_text_roles": text_roles,
         }
         return drawing
 
@@ -210,6 +212,8 @@ class DimensionInterpreter:
 
             first_marker = by_id[candidate.first_id].geometry
             assert isinstance(first_marker, CircleGeometry)
+            text_geometry = candidate.text.geometry
+            assert isinstance(text_geometry, TextGeometry)
             dimension_id = f"NATIVE_{group_id}"
             additions.append(
                 Entity(
@@ -223,6 +227,7 @@ class DimensionInterpreter:
                         dimension_line_point=first_marker.center,
                         angle=0.0 if candidate.axis == "H" else 90.0,
                         measurement_scale=measurement_scale,
+                        display_text=text_geometry.text,
                     ),
                     SemanticType.DIMENSION_LINE,
                     view=candidate.view,
@@ -238,6 +243,8 @@ class DimensionInterpreter:
                 )
             )
             for entity in candidate.members:
+                if entity.metadata.get("dimension_text_role") == "reference":
+                    continue
                 entity.metadata["resolved_dimension"] = dimension_id
                 entity.metadata["suppress_cad_export"] = True
             promoted += 1
@@ -260,12 +267,18 @@ class DimensionInterpreter:
             entity for entity in drawing.entities
             if group_id in entity.metadata.get("dimension_graphics", [])
         )
-        texts = [
+        all_texts = [
             entity for entity in members
             if entity.semantic_type == SemanticType.DIMENSION_TEXT
         ]
+        texts = [
+            entity for entity in all_texts
+            if entity.metadata.get("dimension_text_role") == "primary"
+        ]
+        if not all_texts:
+            return None, "dimension_text_missing"
         if len(texts) != 1:
-            return None, "dimension_text_not_single"
+            return None, "dimension_text_ambiguous"
         value = texts[0].metadata.get("parsed_dimension_value")
         if not isinstance(value, (int, float)) or value <= 0:
             return None, "dimension_text_not_numeric"
@@ -293,6 +306,42 @@ class DimensionInterpreter:
             group_id, first_id, axis, members, texts[0], float(value),
             points[0], points[1], measured, float(value) / measured, view,
         ), ""
+
+    @staticmethod
+    def _assign_dimension_text_roles(
+        drawing: Drawing,
+        groups: list[tuple[str, str, str, str]],
+    ) -> dict[str, int]:
+        counts = {"primary": 0, "reference": 0, "ambiguous": 0}
+        for group_id, _first_id, _second_id, _axis in groups:
+            texts = [
+                entity for entity in drawing.entities
+                if entity.semantic_type == SemanticType.DIMENSION_TEXT
+                and entity.metadata.get("dimension_graphics") == [group_id]
+                and isinstance(entity.geometry, TextGeometry)
+            ]
+            roles: dict[str, str] = {}
+            if len(texts) == 1:
+                roles[texts[0].id] = "primary"
+            elif len(texts) > 1:
+                primary, references = _primary_and_parenthesized_references(texts)
+                if primary is not None:
+                    roles[primary.id] = "primary"
+                    roles.update({entity.id: "reference" for entity in references})
+                    primary.metadata["dimension_reference_entities"] = [
+                        entity.id for entity in references
+                    ]
+                    primary.metadata["dimension_reference_text"] = " ".join(
+                        entity.geometry.text for entity in references
+                        if isinstance(entity.geometry, TextGeometry)
+                    )
+                    for reference in references:
+                        reference.metadata["dimension_primary_entity"] = primary.id
+            for entity in texts:
+                role = roles.get(entity.id, "ambiguous")
+                entity.metadata["dimension_text_role"] = role
+                counts[role] += 1
+        return counts
 
     @staticmethod
     def _associate_dimension_texts(
@@ -344,6 +393,13 @@ class DimensionInterpreter:
             entity.semantic_type = SemanticType.DIMENSION_TEXT
             entity.metadata["semantic_evidence"] = "text_near_dimension_graphic"
             entity.metadata["dimension_graphics"] = [group_id]
+            normalized_text = _normalize_dimension_text(geometry.text)
+            if normalized_text != geometry.text:
+                entity.metadata["ocr_raw_text"] = geometry.text
+                entity.metadata["normalized_dimension_text"] = normalized_text
+                entity.metadata["dimension_symbol"] = "square"
+                geometry = replace(geometry, text=normalized_text)
+                entity.geometry = geometry
             value = _numeric_dimension_value(geometry.text)
             if value is not None:
                 entity.metadata["parsed_dimension_value"] = value
@@ -537,6 +593,70 @@ def _numeric_dimension_value(text: str) -> float | None:
         return float(compact)
     except ValueError:
         return None
+
+
+def _normalize_dimension_text(text: str) -> str:
+    compact = re.sub(r"\s+", "", text)
+    square_misread = re.fullmatch(r"0([1-9][0-9]{2,}(?:[.,][0-9]+)?)", compact)
+    if square_misread:
+        return f"□{square_misread.group(1)}"
+    return text
+
+
+def _primary_and_parenthesized_references(
+    texts: list[Entity],
+) -> tuple[Entity | None, tuple[Entity, ...]]:
+    ordered = sorted(
+        texts,
+        key=lambda entity: (
+            entity.geometry.insertion.x
+            if isinstance(entity.geometry, TextGeometry) else 0.0
+        ),
+    )
+    standalone = [
+        entity for entity in ordered
+        if isinstance(entity.geometry, TextGeometry)
+        and _numeric_dimension_value(entity.geometry.text) is not None
+        and re.sub(r"\s+", "", entity.geometry.text)[:1] not in "(（["
+        and re.sub(r"\s+", "", entity.geometry.text)[-1:] not in ")）]"
+    ]
+    if len(standalone) != 1:
+        return None, ()
+    primary = standalone[0]
+    references = tuple(entity for entity in ordered if entity is not primary)
+    if not references or ordered[0] is not primary:
+        return None, ()
+    reference_texts = [
+        entity.geometry for entity in references
+        if isinstance(entity.geometry, TextGeometry)
+    ]
+    if len(reference_texts) != len(references):
+        return None, ()
+    compact_first = re.sub(r"\s+", "", reference_texts[0].text)
+    compact_last = re.sub(r"\s+", "", reference_texts[-1].text)
+    bracket_pairs = {"(": ")", "（": "）", "[": "]"}
+    if not compact_first or compact_first[0] not in bracket_pairs:
+        return None, ()
+    if not compact_last or compact_last[-1] != bracket_pairs[compact_first[0]]:
+        return None, ()
+    if any(_numeric_dimension_value(geometry.text) is None for geometry in reference_texts):
+        return None, ()
+
+    geometries = [primary.geometry, *reference_texts]
+    assert all(isinstance(geometry, TextGeometry) for geometry in geometries)
+    maximum_height = max(geometry.height for geometry in geometries)
+    baseline = primary.geometry.insertion.y
+    if any(
+        abs(geometry.insertion.y - baseline) > maximum_height * 0.35
+        for geometry in reference_texts
+    ):
+        return None, ()
+    for first, second in zip(geometries, geometries[1:]):
+        first_end = first.insertion.x + (first.width or first.height)
+        gap = second.insertion.x - first_end
+        if gap < -maximum_height * 0.25 or gap > maximum_height * 2.0:
+            return None, ()
+    return primary, references
 
 
 def _point_segment_distance(

@@ -140,6 +140,20 @@ standard measurement factor within 1%. The tracked sample establishes factor
 3.0 for `VIEW_004`, promoting the `454` and `455` dimensions while retaining
 ambiguous groups as graphics.
 
+Multiple OCR words associated with one graphical dimension are not concatenated
+blindly. A standalone numeric word followed on the same baseline by a complete
+parenthesized sequence is classified as `primary` plus `reference` words. Other
+multi-word cases are `ambiguous`. In the tracked sample this preserves `0460`
+as the primary value and `(309 612)` as reference annotation, while the OCR
+fragments around the printed `22.8` remain ambiguous instead of becoming `223`.
+
+Square-dimension symbols misread by OCR as a leading zero are normalized only
+after association with graphical dimensions. The raw OCR word remains in
+metadata, while IR text and native DIMENSION display text use `□`. A narrowly
+scoped line-level PSM 7 retry can recover low-confidence candidates such as
+`□442.4`; it accepts exactly one well-formed numeric result and otherwise leaves
+the source unresolved. R2000 Unicode escaping is delegated to ezdxf.
+
 ## 13. Dependencies
 
 PyMuPDF is isolated in the input adapters and supplies native vector paths and

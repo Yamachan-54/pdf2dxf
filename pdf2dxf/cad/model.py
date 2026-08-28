@@ -76,6 +76,7 @@ class CadDimension(CadEntity):
     dimension_line_point: Point | None = None
     angle: float = 0.0
     measurement_scale: float = 1.0
+    display_text: str | None = None
 
     @property
     def resolved(self) -> bool:
@@ -141,6 +142,7 @@ def build_cad_model(drawing: Drawing) -> CadModel:
                     geometry.references, geometry.first_point,
                     geometry.second_point, geometry.dimension_line_point,
                     geometry.angle, geometry.measurement_scale,
+                    geometry.display_text,
                 )
             )
     return model

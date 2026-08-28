@@ -395,13 +395,16 @@ class PipelineTests(unittest.TestCase):
                 "native_dimension_entities": 0,
                 "unresolved_graphic_groups": 1,
                 "unresolved_reasons": {
-                    "DIMENSION_GRAPHIC_001": "dimension_text_not_single",
+                    "DIMENSION_GRAPHIC_001": "dimension_text_ambiguous",
                 },
                 "view_measurement_scales": {},
                 "marker_entities": 2,
                 "dimension_line_entities": 1,
                 "extension_line_entities": 2,
                 "dimension_text_entities": 2,
+                "dimension_text_roles": {
+                    "primary": 0, "reference": 0, "ambiguous": 2,
+                },
             },
         )
 
@@ -452,7 +455,7 @@ class PipelineTests(unittest.TestCase):
                 ),
                 Entity(
                     "DIM_TEXT", "text",
-                    TextGeometry("100", Point(67, 52), 2, width=6), page=1,
+                    TextGeometry("0100", Point(67, 52), 2, width=6), page=1,
                 ),
             ],
         )
@@ -470,6 +473,13 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(native[0].geometry.first_point, Point(20, 70))
         self.assertEqual(native[0].geometry.second_point, Point(120, 70))
         self.assertEqual(native[0].geometry.value, 100.0)
+        self.assertEqual(native[0].geometry.display_text, "□100")
+        normalized_text = next(
+            entity for entity in drawing.entities if entity.id == "DIM_TEXT"
+        )
+        self.assertEqual(normalized_text.geometry.text, "□100")
+        self.assertEqual(normalized_text.metadata["ocr_raw_text"], "0100")
+        self.assertEqual(normalized_text.metadata["dimension_symbol"], "square")
         self.assertEqual(drawing.metadata["dimension_analysis"]["native_dimension_entities"], 1)
         self.assertEqual(drawing.metadata["dimension_analysis"]["unresolved_graphic_groups"], 0)
 
@@ -480,7 +490,9 @@ class PipelineTests(unittest.TestCase):
             DxfExporter().export(model, target)
             document = ezdxf.readfile(target)
             self.assertFalse(document.audit().has_errors)
-            self.assertEqual(len(document.modelspace().query("DIMENSION")), 1)
+            dimension = document.modelspace().query("DIMENSION").first
+            self.assertIsNotNone(dimension)
+            self.assertEqual(_decode_r2000_unicode(dimension.dxf.text), "□100")
             self.assertEqual(len(document.modelspace().query("CIRCLE LINE TEXT")), 0)
 
     def test_two_dimensions_in_one_view_confirm_three_to_one_scale(self) -> None:
@@ -590,6 +602,14 @@ class PipelineTests(unittest.TestCase):
                     "TEXT", "text", TextGeometry("300", Point(67, 52), 2, width=6),
                     page=1,
                 ),
+                Entity(
+                    "REF1", "text", TextGeometry("(100", Point(76, 52), 2, width=6),
+                    page=1,
+                ),
+                Entity(
+                    "REF2", "text", TextGeometry("200)", Point(85, 52), 2, width=6),
+                    page=1,
+                ),
             ],
         )
         interpreter = DimensionInterpreter()
@@ -605,6 +625,21 @@ class PipelineTests(unittest.TestCase):
         analysis = drawing.metadata["dimension_analysis"]
         self.assertEqual(analysis["native_dimension_entities"], 0)
         self.assertEqual(analysis["view_measurement_scales"], {})
+        self.assertEqual(
+            analysis["dimension_text_roles"],
+            {"primary": 1, "reference": 2, "ambiguous": 0},
+        )
+        text_roles = {
+            entity.id: entity.metadata.get("dimension_text_role")
+            for entity in drawing.entities
+            if entity.id in {"TEXT", "REF1", "REF2"}
+        }
+        self.assertEqual(
+            text_roles,
+            {"TEXT": "primary", "REF1": "reference", "REF2": "reference"},
+        )
+        primary = next(entity for entity in drawing.entities if entity.id == "TEXT")
+        self.assertEqual(primary.metadata["dimension_reference_text"], "(100 200)")
         self.assertEqual(
             analysis["unresolved_reasons"]["DIMENSION_GRAPHIC_001"],
             "view_scale_not_confirmed",
