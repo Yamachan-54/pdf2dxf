@@ -154,6 +154,15 @@ scoped line-level PSM 7 retry can recover low-confidence candidates such as
 `□442.4`; it accepts exactly one well-formed numeric result and otherwise leaves
 the source unresolved. R2000 Unicode escaping is delegated to ezdxf.
 
+Dimension membership is role-aware rather than exclusive. One line may be a
+dimension line for one group and an orthogonal extension line for another;
+these memberships are stored separately as `dimension_line_graphics` and
+`dimension_extension_graphics`. Definition points are recovered per group.
+Source graphics are suppressed only when every group using that Entity has
+been promoted, so resolving one dimension cannot erase an unresolved neighbor.
+This promotes the tracked sample's `□442.4`, `□460`, `□454`, and `455` as four
+native DIMENSION entities with factor 3.0.
+
 ## 13. Dependencies
 
 PyMuPDF is isolated in the input adapters and supplies native vector paths and

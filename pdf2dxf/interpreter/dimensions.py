@@ -80,6 +80,7 @@ class DimensionInterpreter:
                 marker_axes[second.id].add(axis)
                 for line in connecting:
                     dimension_lines[line.id].add(group_id)
+        group_axes = {group_id: axis for group_id, _first, _second, axis in groups}
 
         by_id = {entity.id: entity for entity in drawing.entities}
         marker_groups: dict[str, set[str]] = defaultdict(set)
@@ -98,24 +99,33 @@ class DimensionInterpreter:
             line.semantic_type = SemanticType.DIMENSION_LINE
             line.confidence = 0.88
             line.metadata["semantic_evidence"] = "between_dimension_markers"
-            line.metadata["dimension_graphics"] = sorted(group_ids)
+            line.metadata["dimension_line_graphics"] = sorted(group_ids)
 
         extension_lines: dict[str, set[str]] = defaultdict(set)
         for marker_id, axes in marker_axes.items():
             marker = by_id[marker_id]
             for dimension_axis in axes:
                 perpendicular = "V" if dimension_axis == "H" else "H"
+                target_groups = {
+                    group_id for group_id in marker_groups[marker_id]
+                    if group_axes[group_id] == dimension_axis
+                }
                 for line in axis_lines[(marker.page, perpendicular)]:
-                    if line.id in dimension_lines:
-                        continue
                     if _ends_at_marker(line, marker):
-                        extension_lines[line.id].update(marker_groups[marker_id])
+                        extension_lines[line.id].update(target_groups)
         for line_id, group_ids in extension_lines.items():
             line = by_id[line_id]
-            line.semantic_type = SemanticType.DIMENSION_EXTENSION_LINE
-            line.confidence = 0.84
-            line.metadata["semantic_evidence"] = "perpendicular_to_dimension_marker"
-            line.metadata["dimension_graphics"] = sorted(group_ids)
+            line.metadata["dimension_extension_graphics"] = sorted(group_ids)
+            if line_id not in dimension_lines:
+                line.semantic_type = SemanticType.DIMENSION_EXTENSION_LINE
+                line.confidence = 0.84
+                line.metadata["semantic_evidence"] = "perpendicular_to_dimension_marker"
+        for line_id in dimension_lines.keys() | extension_lines.keys():
+            line = by_id[line_id]
+            line.metadata["dimension_graphics"] = sorted(
+                dimension_lines.get(line_id, set())
+                | extension_lines.get(line_id, set())
+            )
 
         dimension_texts = self._associate_dimension_texts(
             drawing, groups, by_id, page_scales
@@ -197,6 +207,7 @@ class DimensionInterpreter:
             }
 
         promoted = 0
+        promoted_groups: set[str] = set()
         additions: list[Entity] = []
         for group_id, candidate in candidates.items():
             if _relative_error(candidate.ratio, 1.0) <= _SCALE_RELATIVE_TOLERANCE:
@@ -242,12 +253,21 @@ class DimensionInterpreter:
                     },
                 )
             )
-            for entity in candidate.members:
-                if entity.metadata.get("dimension_text_role") == "reference":
-                    continue
-                entity.metadata["resolved_dimension"] = dimension_id
-                entity.metadata["suppress_cad_export"] = True
+            promoted_groups.add(group_id)
             promoted += 1
+        for entity in drawing.entities:
+            memberships = set(entity.metadata.get("dimension_graphics", []))
+            resolved_memberships = memberships & promoted_groups
+            if resolved_memberships:
+                entity.metadata["resolved_dimensions"] = sorted(
+                    f"NATIVE_{group_id}" for group_id in resolved_memberships
+                )
+            if (
+                memberships
+                and memberships <= promoted_groups
+                and entity.metadata.get("dimension_text_role") != "reference"
+            ):
+                entity.metadata["suppress_cad_export"] = True
         drawing.entities.extend(additions)
         analysis = drawing.metadata.setdefault("dimension_analysis", {})
         analysis["native_dimension_entities"] = promoted
@@ -282,14 +302,11 @@ class DimensionInterpreter:
         value = texts[0].metadata.get("parsed_dimension_value")
         if not isinstance(value, (int, float)) or value <= 0:
             return None, "dimension_text_not_numeric"
-        if any(
-            entity.metadata.get("dimension_graphics") != [group_id]
-            for entity in members
-        ):
-            return None, "shared_dimension_graphics"
         points: list[Point] = []
         for marker_id in (first_id, second_id):
-            definition_points = _definition_points(by_id[marker_id], list(members))
+            definition_points = _definition_points(
+                by_id[marker_id], list(members), group_id
+            )
             if len(definition_points) != 1:
                 return None, "definition_points_incomplete"
             points.append(definition_points[0])
@@ -542,12 +559,14 @@ def _ends_at_marker(line: Entity, marker: Entity) -> bool:
     return endpoint_distance <= marker_geometry.radius * 1.25
 
 
-def _definition_points(marker: Entity, members: list[Entity]) -> list[Point]:
+def _definition_points(
+    marker: Entity, members: list[Entity], group_id: str
+) -> list[Point]:
     marker_geometry = marker.geometry
     assert isinstance(marker_geometry, CircleGeometry)
     points: list[Point] = []
     for entity in members:
-        if entity.semantic_type != SemanticType.DIMENSION_EXTENSION_LINE:
+        if group_id not in entity.metadata.get("dimension_extension_graphics", []):
             continue
         geometry = entity.geometry
         assert isinstance(geometry, LineGeometry)

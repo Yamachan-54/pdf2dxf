@@ -570,6 +570,88 @@ class PipelineTests(unittest.TestCase):
             }
             self.assertEqual(rendered_text, {"150", "300"})
 
+    def test_crossing_dimension_lines_can_serve_as_shared_extension_lines(self) -> None:
+        marker_metadata = {
+            "reconstruction": "circle_from_lines",
+            "source_entities": [f"S{index}" for index in range(20)],
+        }
+        drawing = Drawing(
+            "mm", sheets=[Sheet("SHEET_001", 1, (0, 0, 200, 200))],
+            entities=[
+                Entity(
+                    "SHARED", "circle", CircleGeometry(Point(20, 50), 0.5),
+                    page=1, metadata=dict(marker_metadata),
+                ),
+                Entity(
+                    "H_MARK", "circle", CircleGeometry(Point(120, 50), 0.5),
+                    page=1, metadata=dict(marker_metadata),
+                ),
+                Entity(
+                    "V_MARK", "circle", CircleGeometry(Point(20, 80), 0.5),
+                    page=1, metadata=dict(marker_metadata),
+                ),
+                Entity(
+                    "H_DIM", "line", LineGeometry(Point(20.5, 50), Point(119.5, 50)),
+                    page=1,
+                ),
+                Entity(
+                    "V_DIM", "line", LineGeometry(Point(20, 50.5), Point(20, 79.5)),
+                    page=1,
+                ),
+                Entity(
+                    "H_EXT", "line", LineGeometry(Point(120, 50.5), Point(120, 70)),
+                    page=1,
+                ),
+                Entity(
+                    "V_EXT", "line", LineGeometry(Point(20.5, 80), Point(40, 80)),
+                    page=1,
+                ),
+                Entity(
+                    "H_TEXT", "text", TextGeometry("100", Point(67, 52), 2, width=6),
+                    page=1,
+                ),
+                Entity(
+                    "V_TEXT", "text", TextGeometry("30", Point(18, 64), 2, width=2),
+                    page=1,
+                ),
+            ],
+        )
+        interpreter = DimensionInterpreter()
+        drawing = interpreter.resolve(
+            interpreter.analyze(SemanticClassifier().classify(drawing))
+        )
+
+        native = [
+            entity for entity in drawing.entities
+            if isinstance(entity.geometry, DimensionGeometry)
+        ]
+        self.assertEqual(len(native), 2)
+        self.assertEqual({entity.geometry.value for entity in native}, {30.0, 100.0})
+        self.assertEqual(
+            next(entity for entity in drawing.entities if entity.id == "H_DIM").metadata[
+                "dimension_extension_graphics"
+            ],
+            ["DIMENSION_GRAPHIC_002"],
+        )
+        self.assertEqual(
+            next(entity for entity in drawing.entities if entity.id == "V_DIM").metadata[
+                "dimension_extension_graphics"
+            ],
+            ["DIMENSION_GRAPHIC_001"],
+        )
+        self.assertTrue(
+            next(entity for entity in drawing.entities if entity.id == "SHARED").metadata[
+                "suppress_cad_export"
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "shared-dimensions.dxf"
+            DxfExporter().export(build_cad_model(drawing), target)
+            document = ezdxf.readfile(target)
+            self.assertFalse(document.audit().has_errors)
+            self.assertEqual(len(document.modelspace().query("DIMENSION")), 2)
+            self.assertEqual(len(document.modelspace().query("CIRCLE LINE TEXT")), 0)
+
     def test_one_scaled_dimension_does_not_confirm_view_scale(self) -> None:
         marker_metadata = {
             "reconstruction": "circle_from_lines",
