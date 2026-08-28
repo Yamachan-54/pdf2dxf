@@ -102,6 +102,8 @@ class CadModel:
 def build_cad_model(drawing: Drawing) -> CadModel:
     model = CadModel(drawing.unit, metadata={"drawing_schema": drawing.schema_version})
     for entity in drawing.entities:
+        if entity.metadata.get("suppress_cad_export") is True:
+            continue
         common = (
             entity.id, entity.semantic_type, entity.view, entity.confidence,
             entity.style.true_color, entity.page,

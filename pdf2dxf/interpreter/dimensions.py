@@ -6,8 +6,10 @@ import re
 
 from ..ir.drawing import Drawing
 from ..ir.entities import (
-    CircleGeometry, Entity, LineGeometry, SemanticType, TextGeometry,
+    CircleGeometry, DimensionGeometry, Entity, LineGeometry, SemanticType,
+    TextGeometry,
 )
+from ..geometry import Point
 
 
 class DimensionInterpreter:
@@ -95,15 +97,112 @@ class DimensionInterpreter:
         dimension_texts = self._associate_dimension_texts(
             drawing, groups, by_id, page_scales
         )
+        promoted, unresolved_reasons = self._promote_native_dimensions(
+            drawing, groups, by_id
+        )
 
         drawing.metadata["dimension_analysis"] = {
-            "unresolved_graphic_groups": len(groups),
+            "native_dimension_entities": promoted,
+            "unresolved_graphic_groups": len(groups) - promoted,
+            "unresolved_reasons": unresolved_reasons,
             "marker_entities": len(marker_groups),
             "dimension_line_entities": len(dimension_lines),
             "extension_line_entities": len(extension_lines),
             "dimension_text_entities": dimension_texts,
         }
         return drawing
+
+    @staticmethod
+    def _promote_native_dimensions(
+        drawing: Drawing,
+        groups: list[tuple[str, str, str, str]],
+        by_id: dict[str, Entity],
+    ) -> tuple[int, dict[str, str]]:
+        """Promote only complete, unambiguous, 1:1 linear dimensions.
+
+        PDF coordinates describe paper space. A printed value must not become
+        native DIMENSION geometry until it agrees with the recovered
+        definition-point distance. Scaled views remain graphical dimensions
+        until view-scale inference is available.
+        """
+        promoted = 0
+        unresolved: dict[str, str] = {}
+        additions: list[Entity] = []
+        for group_id, first_id, second_id, axis in groups:
+            members = [
+                entity for entity in drawing.entities
+                if group_id in entity.metadata.get("dimension_graphics", [])
+            ]
+            texts = [
+                entity for entity in members
+                if entity.semantic_type == SemanticType.DIMENSION_TEXT
+            ]
+            if len(texts) != 1:
+                unresolved[group_id] = "dimension_text_not_single"
+                continue
+            value = texts[0].metadata.get("parsed_dimension_value")
+            if not isinstance(value, (int, float)) or value <= 0:
+                unresolved[group_id] = "dimension_text_not_numeric"
+                continue
+            if any(
+                entity.metadata.get("dimension_graphics") != [group_id]
+                for entity in members
+            ):
+                unresolved[group_id] = "shared_dimension_graphics"
+                continue
+
+            definition_points: list[Point] = []
+            for marker_id in (first_id, second_id):
+                candidates = _definition_points(by_id[marker_id], members)
+                if len(candidates) != 1:
+                    unresolved[group_id] = "definition_points_incomplete"
+                    break
+                definition_points.append(candidates[0])
+            if len(definition_points) != 2:
+                continue
+
+            measured = (
+                abs(definition_points[1].x - definition_points[0].x)
+                if axis == "H"
+                else abs(definition_points[1].y - definition_points[0].y)
+            )
+            tolerance = max(0.1, float(value) * 0.01)
+            if abs(measured - float(value)) > tolerance:
+                unresolved[group_id] = "paper_measurement_differs_from_text"
+                continue
+
+            first_marker = by_id[first_id].geometry
+            assert isinstance(first_marker, CircleGeometry)
+            references = tuple(entity.id for entity in members)
+            dimension_id = f"NATIVE_{group_id}"
+            additions.append(
+                Entity(
+                    dimension_id, "dimension",
+                    DimensionGeometry(
+                        "linear", float(value), references,
+                        orientation="horizontal" if axis == "H" else "vertical",
+                        first_point=definition_points[0],
+                        second_point=definition_points[1],
+                        dimension_line_point=first_marker.center,
+                        angle=0.0 if axis == "H" else 90.0,
+                    ),
+                    SemanticType.DIMENSION_LINE,
+                    confidence=min(entity.confidence for entity in members),
+                    page=by_id[first_id].page,
+                    metadata={
+                        "semantic_evidence": "resolved_linear_dimension",
+                        "dimension_graphic": group_id,
+                        "dimension_text_entity": texts[0].id,
+                        "paper_measurement": measured,
+                    },
+                )
+            )
+            for entity in members:
+                entity.metadata["resolved_dimension"] = dimension_id
+                entity.metadata["suppress_cad_export"] = True
+            promoted += 1
+        drawing.entities.extend(additions)
+        return promoted, unresolved
 
     @staticmethod
     def _associate_dimension_texts(
@@ -295,6 +394,29 @@ def _ends_at_marker(line: Entity, marker: Entity) -> bool:
         ),
     )
     return endpoint_distance <= marker_geometry.radius * 1.25
+
+
+def _definition_points(marker: Entity, members: list[Entity]) -> list[Point]:
+    marker_geometry = marker.geometry
+    assert isinstance(marker_geometry, CircleGeometry)
+    points: list[Point] = []
+    for entity in members:
+        if entity.semantic_type != SemanticType.DIMENSION_EXTENSION_LINE:
+            continue
+        geometry = entity.geometry
+        assert isinstance(geometry, LineGeometry)
+        start_distance = hypot(
+            geometry.start.x - marker_geometry.center.x,
+            geometry.start.y - marker_geometry.center.y,
+        )
+        end_distance = hypot(
+            geometry.end.x - marker_geometry.center.x,
+            geometry.end.y - marker_geometry.center.y,
+        )
+        if min(start_distance, end_distance) > marker_geometry.radius * 1.25:
+            continue
+        points.append(geometry.end if start_distance < end_distance else geometry.start)
+    return points
 
 
 def _looks_like_dimension_text(text: str) -> bool:

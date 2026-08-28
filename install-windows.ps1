@@ -3,6 +3,7 @@
 [CmdletBinding()]
 param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\pdf2dxf"),
+    [string]$OcrBundleDir,
     [switch]$NoPath
 )
 
@@ -23,6 +24,7 @@ $StageDir = "$InstallDir.installing-$PID"
 $BackupDir = "$InstallDir.backup-$PID"
 $DownloadDir = Join-Path ([System.IO.Path]::GetTempPath()) "pdf2dxf-install-$PID"
 $Installed = $false
+$OcrSource = $null
 
 function Get-FileChecked {
     param(
@@ -84,6 +86,24 @@ if (-not [Environment]::Is64BitOperatingSystem) {
 if (-not (Test-Path -LiteralPath $PackageSource -PathType Container)) {
     throw "The pdf2dxf package folder is missing. Extract the complete project ZIP before running this installer."
 }
+if (-not [string]::IsNullOrWhiteSpace($OcrBundleDir)) {
+    if (-not (Test-Path -LiteralPath $OcrBundleDir -PathType Container)) {
+        throw "The OCR bundle directory was not found: $OcrBundleDir"
+    }
+    $OcrSource = (Resolve-Path -LiteralPath $OcrBundleDir).Path
+} elseif (Test-Path -LiteralPath (Join-Path $InstallDir "ocr") -PathType Container) {
+    # A Gitless ZIP update should retain an OCR bundle from the prior install.
+    $OcrSource = (Resolve-Path -LiteralPath (Join-Path $InstallDir "ocr")).Path
+}
+if ($OcrSource) {
+    foreach ($RequiredOcrFile in @(
+        "tesseract.exe", "tessdata\eng.traineddata", "tessdata\jpn.traineddata"
+    )) {
+        if (-not (Test-Path -LiteralPath (Join-Path $OcrSource $RequiredOcrFile) -PathType Leaf)) {
+            throw "The OCR bundle is incomplete; missing: $RequiredOcrFile"
+        }
+    }
+}
 
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -122,8 +142,27 @@ try {
     Write-Host "[4/5] Installing pdf2dxf..."
     Copy-Item -LiteralPath $PackageSource -Destination $SitePackages -Recurse -Force
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "uninstall-windows.ps1") -Destination $StageDir -Force
+    if ($OcrSource) {
+        $StageOcrDir = Join-Path $StageDir "ocr"
+        Copy-Item -LiteralPath $OcrSource -Destination $StageOcrDir -Recurse -Force
+        $StageTesseract = Join-Path $StageOcrDir "tesseract.exe"
+        $PreviousTessdataPrefix = $env:TESSDATA_PREFIX
+        try {
+            $env:TESSDATA_PREFIX = Join-Path $StageOcrDir "tessdata"
+            $OcrLanguages = & $StageTesseract --list-langs 2>&1
+            if ($LASTEXITCODE -ne 0 -or -not ($OcrLanguages -match "(?m)^eng$") -or -not ($OcrLanguages -match "(?m)^jpn$")) {
+                throw "The staged OCR bundle failed validation or does not provide eng and jpn."
+            }
+        } finally {
+            $env:TESSDATA_PREFIX = $PreviousTessdataPrefix
+        }
+    }
     @'
 @echo off
+if exist "%~dp0ocr\tesseract.exe" (
+  set "PATH=%~dp0ocr;%PATH%"
+  set "TESSDATA_PREFIX=%~dp0ocr\tessdata"
+)
 "%~dp0runtime\python.exe" -m pdf2dxf %*
 '@ | Set-Content -LiteralPath (Join-Path $StageDir "pdf2dxf.cmd") -Encoding ASCII
 
@@ -153,6 +192,11 @@ try {
     Write-Host ""
     Write-Host "pdf2dxf $VersionOutput was installed in:"
     Write-Host "  $InstallDir"
+    if ($OcrSource) {
+        Write-Host "Japanese/English OCR bundle: enabled"
+    } else {
+        Write-Host "OCR bundle: not installed (use -OcrBundleDir to add one)"
+    }
     if ($NoPath) {
         Write-Host "Run it with: $InstallDir\pdf2dxf.cmd input.pdf output.dxf"
     } else {

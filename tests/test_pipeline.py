@@ -26,8 +26,8 @@ from pdf2dxf.interpreter.classifier import SemanticClassifier
 from pdf2dxf.interpreter.dimensions import DimensionInterpreter
 from pdf2dxf.ir.drawing import Drawing, Sheet
 from pdf2dxf.ir.entities import (
-    CircleGeometry, Entity, LineGeometry, SemanticType, SourceEvidence, Style,
-    TextGeometry,
+    CircleGeometry, DimensionGeometry, Entity, LineGeometry, SemanticType,
+    SourceEvidence, Style, TextGeometry,
 )
 from pdf2dxf.sheet.analyzer import SheetAnalyzer
 from pdf2dxf.views.detector import ViewDetector
@@ -391,7 +391,11 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(
             drawing.metadata["dimension_analysis"],
             {
+                "native_dimension_entities": 0,
                 "unresolved_graphic_groups": 1,
+                "unresolved_reasons": {
+                    "DIMENSION_GRAPHIC_001": "dimension_text_not_single",
+                },
                 "marker_entities": 2,
                 "dimension_line_entities": 1,
                 "extension_line_entities": 2,
@@ -415,6 +419,66 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(circle_layers, Counter({"DIMENSION": 2, "GEOMETRY": 1}))
         self.assertEqual(line_layers, Counter({"DIMENSION": 3}))
         self.assertEqual(text_layers, Counter({"DIMENSION": 2, "TEXT": 1}))
+
+    def test_complete_one_to_one_dimension_is_promoted_to_native_entity(self) -> None:
+        marker_metadata = {
+            "reconstruction": "circle_from_lines",
+            "source_entities": [f"S{index}" for index in range(20)],
+        }
+        drawing = Drawing(
+            "mm", sheets=[Sheet("SHEET_001", 1, (0, 0, 200, 200))],
+            entities=[
+                Entity(
+                    "M1", "circle", CircleGeometry(Point(20, 50), 0.5),
+                    page=1, metadata=dict(marker_metadata),
+                ),
+                Entity(
+                    "M2", "circle", CircleGeometry(Point(120, 50), 0.5),
+                    page=1, metadata=dict(marker_metadata),
+                ),
+                Entity(
+                    "DIM", "line", LineGeometry(Point(20.5, 50), Point(119.5, 50)),
+                    page=1,
+                ),
+                Entity(
+                    "EXT1", "line", LineGeometry(Point(20, 50.5), Point(20, 70)),
+                    page=1,
+                ),
+                Entity(
+                    "EXT2", "line", LineGeometry(Point(120, 50.5), Point(120, 70)),
+                    page=1,
+                ),
+                Entity(
+                    "DIM_TEXT", "text",
+                    TextGeometry("100", Point(67, 52), 2, width=6), page=1,
+                ),
+            ],
+        )
+
+        drawing = DimensionInterpreter().analyze(
+            SemanticClassifier().classify(drawing)
+        )
+
+        native = [
+            entity for entity in drawing.entities
+            if isinstance(entity.geometry, DimensionGeometry)
+        ]
+        self.assertEqual(len(native), 1)
+        self.assertEqual(native[0].geometry.first_point, Point(20, 70))
+        self.assertEqual(native[0].geometry.second_point, Point(120, 70))
+        self.assertEqual(native[0].geometry.value, 100.0)
+        self.assertEqual(drawing.metadata["dimension_analysis"]["native_dimension_entities"], 1)
+        self.assertEqual(drawing.metadata["dimension_analysis"]["unresolved_graphic_groups"], 0)
+
+        model = build_cad_model(drawing)
+        self.assertEqual([type(entity).__name__ for entity in model.entities], ["CadDimension"])
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "native-dimension.dxf"
+            DxfExporter().export(model, target)
+            document = ezdxf.readfile(target)
+            self.assertFalse(document.audit().has_errors)
+            self.assertEqual(len(document.modelspace().query("DIMENSION")), 1)
+            self.assertEqual(len(document.modelspace().query("CIRCLE LINE TEXT")), 0)
 
     def test_tesseract_tsv_is_mapped_to_sheet_text_geometry(self) -> None:
         tsv = (

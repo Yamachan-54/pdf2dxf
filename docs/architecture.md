@@ -132,9 +132,11 @@ audit errors, no zero-length LINE, explicit CENTER-layer entities, and multiple
 major drawing views. With optional English OCR it also verifies editable TEXT
 output and associates nearby numeric/variable tokens with graphical dimensions.
 Paired dot-ended graphical dimensions are separated onto the DIMENSION layer,
-while unmatched analytic circles remain manufacturing-hole candidates. OCR
-tokens remain semantic dimension text until split-token assembly and definition
-point inference are trustworthy enough for native DIMENSION promotion.
+while unmatched analytic circles remain manufacturing-hole candidates. A
+linear dimension is promoted only when both definition points, one numeric OCR
+token and a matching 1:1 paper measurement are available. The tracked sample's
+printed values reveal scaled views, so those groups intentionally remain
+graphical until view-scale inference is implemented.
 
 ## 13. Dependencies
 
@@ -142,8 +144,11 @@ PyMuPDF is isolated in the input adapters and supplies native vector paths and
 text. ezdxf is isolated in `exporters/dxf.py` and owns DXF document resources,
 entity creation, serialization and round-trip parsing. Both are required runtime
 dependencies and are installed by the self-contained Windows installer.
-Tesseract is an optional external OCR command and is not yet bundled by the
-Windows installer. Future optional adapters may use OpenCV for raster primitives
+Tesseract is an optional external OCR command. The Windows installer can copy
+and validate a user-supplied portable bundle containing `tesseract.exe` and
+English/Japanese trained data, and preserves that bundle across same-directory
+Gitless ZIP updates. It does not download an unofficial Windows binary. Future
+optional adapters may use OpenCV for raster primitives
 and Z3 or a numerical optimizer for constraints; none is required by the default
 electronic-PDF path.
 
@@ -154,18 +159,17 @@ electronic-PDF path.
 - Drawing IR (`ir/`) owns semantic and source-preserving geometry and has no DXF
   dependency.
 - The CAD model (`cad/model.py`) contains analytic `CadLine`, `CadCircle`,
-  `CadArc`, `CadPolyline`, and `CadText` values. It also has no DXF dependency.
+  `CadArc`, `CadPolyline`, `CadText`, `CadMText`, and `CadDimension` values. It
+  also has no DXF dependency.
 - `pipeline.py` builds the CAD model and calls the exporter after all analysis.
-- `exporters/dxf.py` is the normal exporter and currently serializes R2000
-  (`AC1015`) ASCII tags itself.
-- `dxf.py` is the pre-architecture LINE-only writer retained solely by an old
-  compatibility test; it is not used by the conversion pipeline.
+- `exporters/dxf.py` is the normal ezdxf adapter and serializes R2000 (`AC1015`).
+- The pre-architecture ASCII writer has been removed from the normal and test
+  paths.
 - Semantic-to-layer mapping exists only in the exporter, which is the correct
   dependency direction.
-- `DimensionGeometry` exists in IR, but it contains semantic references rather
-  than the definition points and dimension-line location needed to generate a
-  trustworthy native DXF DIMENSION. HATCH and BLOCK/INSERT CAD models do not yet
-  exist.
+- `DimensionGeometry` holds resolved definition points and the dimension-line
+  location. Unresolved graphical dimensions stay as semantic source entities;
+  HATCH and BLOCK/INSERT CAD models do not yet exist.
 
 ### Impact and migration plan
 
@@ -183,8 +187,8 @@ electronic-PDF path.
 5. Represent single-line and multiline text as distinct `CadText` and `CadMText`
    CAD entity types. Preserve alignment/style fields without importing ezdxf
    enums into the model.
-6. Leave unresolved dimensions out of DXF rather than fabricate geometry. Record
-   every skipped entity and every CAD-to-DXF mapping in exporter debug records.
+6. Do not fabricate native DIMENSION geometry. Preserve unresolved source
+   graphics on DIMENSION and record the reason in Drawing IR metadata.
 7. Remove the obsolete ASCII writer after all old and new tests use ezdxf
    round-trip assertions. Keep the color conversion helper in a neutral module.
 8. Update the Python-free Windows installer to install ezdxf and its required
@@ -198,5 +202,5 @@ The normal path now uses `DxfExporter -> ezdxf -> DXF`. The generic
 R2000 remains the centralized default and `$INSUNITS` comes from `CadModel.unit`.
 The legacy ASCII writer was removed after round-trip tests replaced its final
 compatibility test. Resolved linear dimensions can be emitted as native
-DIMENSION; unresolved dimensions are omitted and recorded with a reason. HATCH,
+DIMENSION; unresolved source graphics are retained and recorded with a reason. HATCH,
 BLOCK, and INSERT remain future CAD model additions.

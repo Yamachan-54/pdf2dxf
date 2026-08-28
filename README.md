@@ -38,6 +38,7 @@ DXFのシリアライズ、Layer、LineType、Text Style、Dimension Style管理
 - PyMuPDF、ezdxfと必須依存をダウンロードしてSHA-256を検証
 - `pdf2dxf` コマンドをユーザーPATHへ追加
 - 既存のシステムPython環境には一切変更を加えない
+- 任意指定されたTesseract OCRバンドルを専用インストール先へ同梱
 
 完了後、新しいコマンドプロンプトまたはPowerShellを開いて実行します。
 
@@ -51,7 +52,21 @@ PowerShellからインストール先を指定する場合は次のように実�
 powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -InstallDir "D:\Tools\pdf2dxf"
 ```
 
-PATHへ追加しない場合は `-NoPath` を指定します。アンインストールは次のコマンドです。
+PATHへ追加しない場合は `-NoPath` を指定します。
+
+日本語OCRも自己完結させる場合は、64-bit Windows用Tesseract一式を用意し、
+`tesseract.exe` と `tessdata\eng.traineddata`、`tessdata\jpn.traineddata` を含む
+フォルダーを指定します。インストーラーは実行と言語データを検証してから組み込みます。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-windows.ps1 -OcrBundleDir ".\tesseract-portable"
+pdf2dxf input.pdf output.dxf --ocr --ocr-language jpn+eng
+```
+
+同じ `InstallDir` を更新する場合、既に組み込まれたOCRバンドルは自動的に引き継がれます。
+OCRを使わない場合は従来どおり追加指定なしでインストールできます。
+
+アンインストールは次のコマンドです。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\pdf2dxf\uninstall-windows.ps1"
@@ -153,10 +168,10 @@ DXF Versionは広い互換性とネイティブEntity対応のバランスから
 - 塗りつぶし、線種、線幅、クリッピングマスクはDXFへ保持せず、輪郭線を出力します。
 - 意味分類は保守的な初期ルールです。投影図種別、寸法解釈、View間Feature対応、Constraint Solverは今後のPhaseです。
 - 分割線からの中心線認識は、軸平行・等間隔・長短交互の明確なパターンだけを対象とします。斜め中心線など不確実なものは形状線のまま残します。
-- 定義点と寸法線位置が揃った線形寸法だけをネイティブ `DIMENSION`へ変換します。情報不足の寸法は誤ったEntityを作らず、`dxf_export.json`へ `unresolved`として記録します。
+- 両側の定義点、単一の数値文字、紙面上の実測値との一致が揃った等倍の線形寸法だけをネイティブ `DIMENSION`へ変換します。情報不足・縮尺不明の寸法は誤ったEntityを作らず、Drawing IRの`dimension_analysis.unresolved_reasons`へ理由を記録します。
 - 文字値を復元できない寸法図形でも、同径小円のペア、点間の線、直交する補助線をそれぞれ `dimension_marker`、`dimension_line`、`dimension_extension_line` としてDrawing IRに保持し、`DIMENSION` Layerへ分離します。この段階では推測したネイティブ `DIMENSION` Entityにはしません。
-- OCR文字が寸法図形の近傍にあり、数値・直径記号・`W2`等の限定パターンに一致する場合は`dimension_text`へ分類します。分割OCR文字を誤結合しないため、値が得られても自動的なネイティブDIMENSION化はまだ行いません。
-- Git不要WindowsインストーラーはTesseract本体と言語データをまだ同梱しません。通常変換はそのまま利用でき、OCRは別途Tesseractを用意した環境でのみ使用できます。
+- OCR文字が寸法図形の近傍にあり、数値・直径記号・`W2`等の限定パターンに一致する場合は`dimension_text`へ分類します。分割OCR文字は誤結合せず未解決のまま残します。
+- Git不要Windowsインストーラーは、利用者が指定した64-bit Tesseractバンドルを検証して自己完結インストールへ取り込めます。Tesseract配布物自体はリポジトリに同梱しません。
 - HATCH、BLOCK、INSERTのIR/CAD Modelは未実装です。ExporterのEntity Handler登録へ追加できる構造です。
 - 円/円弧フィッティングが閾値を満たさないベジェは、誤認識を避けて `LWPOLYLINE` として残します。
 
@@ -170,6 +185,6 @@ python -m unittest discover -s tests -v
 
 テストでは生成した電子PDFを使い、LINE、CIRCLE、ARC、TEXT、MTEXT、DIMENSION、
 意味レイヤー、CENTER/HIDDEN LineType、mm/inch/pt単位、図面枠/表題欄分離、
-回転ページ座標、ゼロ長線除外、分割中心線、寸法図形と加工形状の分離、OCR座標変換・信頼度フィルター、高密度View分離、
+回転ページ座標、ゼロ長線除外、分割中心線、寸法図形と加工形状の分離、安全条件付きネイティブ寸法昇格、OCR座標変換・信頼度フィルター、高密度View分離、
 Drawing IR JSON、Debug出力、既存CLI互換性を検証します。DXFはezdxfで再読込し、
 監査とEntity単位のラウンドトリップ検証を行います。
