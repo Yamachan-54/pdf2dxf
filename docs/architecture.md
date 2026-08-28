@@ -34,7 +34,7 @@ Raster/OCR and constraint solving also had no extension points.
 
 The implemented electronic-PDF path is:
 
-`VectorPdfParser -> Drawing IR -> PrimitiveReconstructor ->`
+`VectorPdfParser (+ optional OcrAdapter) -> Drawing IR -> PrimitiveReconstructor ->`
 `SemanticClassifier -> DimensionInterpreter -> SheetAnalyzer -> ViewDetector ->`
 `CAD Model -> DxfExporter`.
 
@@ -47,7 +47,9 @@ or consume the same IR without changing the exporter.
 
 - `input/vector_pdf.py`: PyMuPDF adapter, page-rotation handling and displayed
   sheet-coordinate normalization.
-- `input/raster_pdf.py`: future raster/OCR parser interface.
+- `input/ocr.py`: optional Tesseract Adapter that renders selected pages and
+  appends editable TextGeometry with source evidence.
+- `input/raster_pdf.py`: future raster-geometry parser interface.
 - `ir/`: serializable drawing, sheet, view, entity, feature and constraint types.
 - `sheet/analyzer.py`: conservative border and full-height title-block separation.
 - `views/detector.py`: connected components for small drawings and major-geometry
@@ -108,9 +110,10 @@ never GEOMETRY.
 7. Add raster preprocessing, OpenCV detectors and OCR adapters.
 8. Add an optional constraint solver behind the solver protocol.
 
-Phases 1-5 are represented in the current architecture; Phases 1-4 have initial
-electronic-PDF implementations. Dimension/raster/solver types and boundaries are
-present but intentionally do not claim automatic interpretation.
+Phases 1-6 have initial electronic-PDF implementations, and Phase 7 now includes
+optional OCR text extraction but not raster geometry reconstruction. Dimension
+graphics and nearby OCR tokens are classified conservatively; they intentionally
+do not claim complete automatic native-DIMENSION interpretation.
 
 ## 12. Test plan
 
@@ -118,27 +121,30 @@ Unit tests cover page parsing, geometry sampling/fitting, IR serialization,
 semantic layer mapping and each DXF entity encoder. Generated vector PDFs verify
 native LINE, CIRCLE, ARC and TEXT reconstruction, border separation, view
 assignment, rotated-page coordinates, degenerate-line removal, expanded
-centerline recognition, graphical dimension separation, dense XY-cut grouping,
-`--dump-ir`, debug JSON and
+centerline recognition, graphical dimension separation, OCR TSV coordinate and
+confidence handling, dense XY-cut grouping, `--dump-ir`, debug JSON and
 regression CLI behavior. A real tracked PDF is used as an acceptance smoke test
 because its detailed content is not a stable unit fixture.
 
 The tracked A3 landscape sample also exercises a portrait MediaBox with
 `/Rotate 90`. Its current smoke-test baseline is native DXF round-trip with no
 audit errors, no zero-length LINE, explicit CENTER-layer entities, and multiple
-major drawing views. Paired dot-ended graphical dimensions are separated onto
-the DIMENSION layer, while unmatched analytic circles remain manufacturing-hole
-candidates. The PDF contains no native text objects, so dimension values cannot
-be promoted safely to native DIMENSION entities until an OCR adapter is introduced.
+major drawing views. With optional English OCR it also verifies editable TEXT
+output and associates nearby numeric/variable tokens with graphical dimensions.
+Paired dot-ended graphical dimensions are separated onto the DIMENSION layer,
+while unmatched analytic circles remain manufacturing-hole candidates. OCR
+tokens remain semantic dimension text until split-token assembly and definition
+point inference are trustworthy enough for native DIMENSION promotion.
 
 ## 13. Dependencies
 
-PyMuPDF is isolated in `VectorPdfParser` and supplies native vector paths and
+PyMuPDF is isolated in the input adapters and supplies native vector paths and
 text. ezdxf is isolated in `exporters/dxf.py` and owns DXF document resources,
 entity creation, serialization and round-trip parsing. Both are required runtime
-dependencies and are installed by the self-contained Windows installer. Future
-optional adapters may use OpenCV for raster primitives, an OCR engine for text,
-and Z3 or a numerical optimizer for constraints; none is required by the current
+dependencies and are installed by the self-contained Windows installer.
+Tesseract is an optional external OCR command and is not yet bundled by the
+Windows installer. Future optional adapters may use OpenCV for raster primitives
+and Z3 or a numerical optimizer for constraints; none is required by the default
 electronic-PDF path.
 
 ## 14. ezdxf migration analysis

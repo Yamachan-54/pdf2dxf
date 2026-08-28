@@ -15,6 +15,8 @@ DXFのシリアライズ、Layer、LineType、Text Style、Dimension Style管理
 - PDFの `/Rotate` を正規化し、回転ページも表示上のSheet座標へ変換
 - PDF側で分割された長線・短点の交互パターンを保守的に中心線として復元
 - ペアになった小円端点と接続線から寸法図形を検出し、加工穴・加工線と分離
+- 任意のTesseract OCR Adapterでアウトライン文字から編集可能なTEXTを追加
+- 寸法図形近傍のOCR数値・変数を `dimension_text` としてDIMENSIONへ分離
 - ゼロ長 `LINE` を除外し、除外数をDrawing IRの再構成統計へ記録
 - Drawing IR、Sheet、View、Feature、Dimension、Constraintの拡張可能なデータモデル
 - 図面外枠・全高セパレータ付き表題欄を製品形状と分離
@@ -93,9 +95,20 @@ pdf2dxf drawing.pdf output.dxf --dump-ir drawing-ir.json
 
 # 抽出・再構築・意味解析のデバッグJSONを保存
 pdf2dxf drawing.pdf output.dxf --debug debug
+
+# ネイティブ文字のないページから数値・英字をOCR（Tesseractが必要）
+pdf2dxf drawing.pdf output.dxf --ocr --ocr-language eng --debug debug
+
+# 日本語言語データを導入済みの場合
+pdf2dxf drawing.pdf output.dxf --ocr --ocr-language jpn+eng
 ```
 
 主なオプションは `pdf2dxf --help` で確認できます。既定の出力単位はmmで、PDFの1 ptを正確に `25.4 / 72 mm` として換算します。複数ページは既定で横に並びます。ページ番号とViewはDrawing IR属性であり、DXFレイヤーとは分離されています。
+
+OCRは明示的に `--ocr` を指定した場合だけ実行します。既定は300dpi、採用信頼度70で、
+ネイティブ文字が存在するページは重複防止のためスキップします。`eng`だけでも数字・英字の
+寸法を取得できますが、日本語全文にはTesseractの`jpn`言語データが必要です。
+実行ファイルがPATHにない場合は`--tesseract-command`でパスを指定できます。
 
 ## DXFレイヤー
 
@@ -129,18 +142,21 @@ DXF Versionは広い互換性とネイティブEntity対応のバランスから
 - `semantic_entities.json`: 意味、View、Confidenceの一覧
 - `drawing_ir.json`: 最終Drawing IR
 - `dxf_export.json`: IR ID、CAD型、DXF型、Layer、LineType、Handle、出力状態の対応
+- `ocr_entities.json`: OCR文字、座標、サイズ、信頼度、元ピクセルbbox（OCR実行時）
 
 ラスター検出用のページ画像や検出オーバーレイは、Raster Parser実装時に同じディレクトリへ追加する予定です。
 
 ## 制限事項
 
-- 現在は電子PDFのベクター/ネイティブ文字を対象とします。スキャン画像のOpenCV解析やOCRはまだ実装していません。
-- アウトライン化された文字はネイティブ文字として取得できません。将来のOCR Adapterへ接続する構造のみ用意しています。
+- OCRは文字抽出に対応しましたが、線画そのものを画像から復元するRaster Geometry Parserは未実装です。
+- アウトライン化された文字は`--ocr`指定時に追加TEXTとして取得できます。元の文字輪郭は証拠保持のため残るので、現段階では見た目が重複する場合があります。
 - 塗りつぶし、線種、線幅、クリッピングマスクはDXFへ保持せず、輪郭線を出力します。
 - 意味分類は保守的な初期ルールです。投影図種別、寸法解釈、View間Feature対応、Constraint Solverは今後のPhaseです。
 - 分割線からの中心線認識は、軸平行・等間隔・長短交互の明確なパターンだけを対象とします。斜め中心線など不確実なものは形状線のまま残します。
 - 定義点と寸法線位置が揃った線形寸法だけをネイティブ `DIMENSION`へ変換します。情報不足の寸法は誤ったEntityを作らず、`dxf_export.json`へ `unresolved`として記録します。
 - 文字値を復元できない寸法図形でも、同径小円のペア、点間の線、直交する補助線をそれぞれ `dimension_marker`、`dimension_line`、`dimension_extension_line` としてDrawing IRに保持し、`DIMENSION` Layerへ分離します。この段階では推測したネイティブ `DIMENSION` Entityにはしません。
+- OCR文字が寸法図形の近傍にあり、数値・直径記号・`W2`等の限定パターンに一致する場合は`dimension_text`へ分類します。分割OCR文字を誤結合しないため、値が得られても自動的なネイティブDIMENSION化はまだ行いません。
+- Git不要WindowsインストーラーはTesseract本体と言語データをまだ同梱しません。通常変換はそのまま利用でき、OCRは別途Tesseractを用意した環境でのみ使用できます。
 - HATCH、BLOCK、INSERTのIR/CAD Modelは未実装です。ExporterのEntity Handler登録へ追加できる構造です。
 - 円/円弧フィッティングが閾値を満たさないベジェは、誤認識を避けて `LWPOLYLINE` として残します。
 
@@ -154,6 +170,6 @@ python -m unittest discover -s tests -v
 
 テストでは生成した電子PDFを使い、LINE、CIRCLE、ARC、TEXT、MTEXT、DIMENSION、
 意味レイヤー、CENTER/HIDDEN LineType、mm/inch/pt単位、図面枠/表題欄分離、
-回転ページ座標、ゼロ長線除外、分割中心線、寸法図形と加工形状の分離、高密度View分離、
+回転ページ座標、ゼロ長線除外、分割中心線、寸法図形と加工形状の分離、OCR座標変換・信頼度フィルター、高密度View分離、
 Drawing IR JSON、Debug出力、既存CLI互換性を検証します。DXFはezdxfで再読込し、
 監査とEntity単位のラウンドトリップ検証を行います。

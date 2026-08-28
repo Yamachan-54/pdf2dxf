@@ -11,7 +11,7 @@ from .converter import ConversionError, convert_pdf
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pdf2dxf",
-        description="PDFのベクター図形をASCII DXFへ変換します。",
+        description="PDF図面を構造化DXFへ変換します。",
     )
     parser.add_argument("input", type=Path, help="入力PDF")
     parser.add_argument("output", type=Path, nargs="?", help="出力DXF（省略時は入力名.dxf）")
@@ -27,6 +27,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--page-gap", type=float, default=10.0, help="ページ間隔（出力単位）")
     parser.add_argument("--curve-steps", type=int, help="ベジェ曲線1本あたりの分割数")
     parser.add_argument("--dump-ir", type=Path, help="Drawing IRをJSONへ保存")
+    parser.add_argument(
+        "--ocr", action="store_true",
+        help="Tesseract OCRでネイティブ文字のないページから文字を抽出",
+    )
+    parser.add_argument(
+        "--ocr-language", default="eng",
+        help="Tesseract言語（既定: eng、例: jpn+eng）",
+    )
+    parser.add_argument(
+        "--ocr-dpi", type=int, default=300,
+        help="OCRレンダリング解像度（既定: 300）",
+    )
+    parser.add_argument(
+        "--ocr-min-confidence", type=float, default=70.0,
+        help="OCR採用信頼度0-100（既定: 70）",
+    )
+    parser.add_argument(
+        "--tesseract-command", default="tesseract",
+        help="Tesseract実行ファイル名またはパス",
+    )
     parser.add_argument(
         "--debug",
         nargs="?",
@@ -87,12 +107,19 @@ def main(argv: list[str] | None = None) -> int:
             curve_steps=args.curve_steps,
             dump_ir=args.dump_ir,
             debug_dir=args.debug,
+            ocr=args.ocr,
+            ocr_language=args.ocr_language,
+            ocr_dpi=args.ocr_dpi,
+            ocr_min_confidence=args.ocr_min_confidence,
+            tesseract_command=args.tesseract_command,
         )
     except ConversionError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
     print(f"{destination}: {result.pages}ページ、{result.entities}エンティティを変換しました")
+    if result.ocr_entities:
+        print(f"OCR: {result.ocr_entities}文字Entityを追加しました")
     if result.empty_pages:
         pages = ", ".join(map(str, result.empty_pages))
         print(

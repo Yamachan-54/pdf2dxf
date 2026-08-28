@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 from math import hypot
+import re
 
 from ..ir.drawing import Drawing
-from ..ir.entities import CircleGeometry, Entity, LineGeometry, SemanticType
+from ..ir.entities import (
+    CircleGeometry, Entity, LineGeometry, SemanticType, TextGeometry,
+)
 
 
 class DimensionInterpreter:
@@ -89,13 +92,74 @@ class DimensionInterpreter:
             line.metadata["semantic_evidence"] = "perpendicular_to_dimension_marker"
             line.metadata["dimension_graphics"] = sorted(group_ids)
 
+        dimension_texts = self._associate_dimension_texts(
+            drawing, groups, by_id, page_scales
+        )
+
         drawing.metadata["dimension_analysis"] = {
             "unresolved_graphic_groups": len(groups),
             "marker_entities": len(marker_groups),
             "dimension_line_entities": len(dimension_lines),
             "extension_line_entities": len(extension_lines),
+            "dimension_text_entities": dimension_texts,
         }
         return drawing
+
+    @staticmethod
+    def _associate_dimension_texts(
+        drawing: Drawing,
+        groups: list[tuple[str, str, str, str]],
+        by_id: dict[str, Entity],
+        page_scales: dict[int, float],
+    ) -> int:
+        segments: list[tuple[str, int, tuple[float, float], tuple[float, float]]] = []
+        for group_id, first_id, second_id, _axis in groups:
+            first_geometry = by_id[first_id].geometry
+            second_geometry = by_id[second_id].geometry
+            assert isinstance(first_geometry, CircleGeometry)
+            assert isinstance(second_geometry, CircleGeometry)
+            segments.append(
+                (
+                    group_id, by_id[first_id].page,
+                    (first_geometry.center.x, first_geometry.center.y),
+                    (second_geometry.center.x, second_geometry.center.y),
+                )
+            )
+
+        count = 0
+        for entity in drawing.entities:
+            geometry = entity.geometry
+            if (
+                entity.semantic_type != SemanticType.TEXT
+                or not isinstance(geometry, TextGeometry)
+                or not _looks_like_dimension_text(geometry.text)
+            ):
+                continue
+            center = (
+                geometry.insertion.x + (geometry.width or geometry.height) / 2.0,
+                geometry.insertion.y + geometry.height / 2.0,
+            )
+            nearby = [
+                (
+                    _point_segment_distance(center, start, end), group_id
+                )
+                for group_id, page, start, end in segments
+                if page == entity.page
+            ]
+            if not nearby:
+                continue
+            distance, group_id = min(nearby)
+            maximum_distance = page_scales.get(entity.page, 1.0) * 0.02
+            if distance > maximum_distance:
+                continue
+            entity.semantic_type = SemanticType.DIMENSION_TEXT
+            entity.metadata["semantic_evidence"] = "text_near_dimension_graphic"
+            entity.metadata["dimension_graphics"] = [group_id]
+            value = _numeric_dimension_value(geometry.text)
+            if value is not None:
+                entity.metadata["parsed_dimension_value"] = value
+            count += 1
+        return count
 
     @staticmethod
     def _is_marker_candidate(entity: Entity, page_scale: float) -> bool:
@@ -231,3 +295,47 @@ def _ends_at_marker(line: Entity, marker: Entity) -> bool:
         ),
     )
     return endpoint_distance <= marker_geometry.radius * 1.25
+
+
+def _looks_like_dimension_text(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    return bool(
+        re.fullmatch(
+            r"[\(\[（]?[φΦØ⌀□]?[0-9]+(?:[.,][0-9]+)?[\)\]）]?",
+            compact,
+        )
+        or re.fullmatch(r"[A-Za-z][0-9]+", compact)
+        or re.fullmatch(r"[0-9]+(?:[.,][0-9]+)?[xX×][0-9]+(?:[.,][0-9]+)?", compact)
+    )
+
+
+def _numeric_dimension_value(text: str) -> float | None:
+    compact = re.sub(r"\s+", "", text)
+    if not re.fullmatch(
+        r"[\(\[（]?[φΦØ⌀□]?[0-9]+(?:[.,][0-9]+)?[\)\]）]?",
+        compact,
+    ):
+        return None
+    compact = re.sub(r"[^0-9.,]", "", compact).replace(",", ".")
+    try:
+        return float(compact)
+    except ValueError:
+        return None
+
+
+def _point_segment_distance(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> float:
+    px, py = point
+    ax, ay = start
+    bx, by = end
+    dx, dy = bx - ax, by - ay
+    length_squared = dx * dx + dy * dy
+    if length_squared <= 1e-15:
+        return hypot(px - ax, py - ay)
+    position = max(
+        0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_squared)
+    )
+    return hypot(px - (ax + position * dx), py - (ay + position * dy))

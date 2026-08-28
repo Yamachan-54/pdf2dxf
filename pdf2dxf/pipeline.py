@@ -11,10 +11,12 @@ from .exporters.dxf import DxfExporter
 from .exporters.base import CadExporter, ExportResult
 from .geometry.reconstruction import PrimitiveReconstructor
 from .geometry.solver import PassthroughSolver
+from .input.ocr import OcrAdapter
 from .input.vector_pdf import VectorPdfParser
 from .interpreter.classifier import SemanticClassifier
 from .interpreter.dimensions import DimensionInterpreter
 from .ir.drawing import Drawing
+from .ir.entities import TextGeometry
 from .sheet.analyzer import SheetAnalyzer
 from .views.detector import ViewDetector
 
@@ -37,9 +39,11 @@ class ConversionPipeline:
         *,
         curve_steps: int | None = None,
         exporter: CadExporter | None = None,
+        ocr_adapter: OcrAdapter | None = None,
     ) -> None:
         config = ReconstructionConfig(default_curve_steps=curve_steps)
         self.parser = VectorPdfParser()
+        self.ocr_adapter = ocr_adapter
         self.reconstructor = PrimitiveReconstructor(config)
         self.classifier = SemanticClassifier()
         self.dimension_interpreter = DimensionInterpreter()
@@ -54,10 +58,16 @@ class ConversionPipeline:
         dump_ir: Path | None = None, debug_dir: Path | None = None,
     ) -> PipelineOutput:
         unit_scale, _units_code = UNIT_SETTINGS[unit]
+        selected_page_indexes = tuple(pages) if pages is not None else None
         drawing = self.parser.parse(
-            source, pages=pages, unit=unit, factor=unit_scale * scale,
+            source, pages=selected_page_indexes, unit=unit,
+            factor=unit_scale * scale,
             layout=layout, page_gap=page_gap,
         )
+        if self.ocr_adapter is not None:
+            drawing = self.ocr_adapter.augment(
+                source, drawing, pages=selected_page_indexes
+            )
         extracted_json = drawing.to_json()
         page_numbers = tuple(sheet.page for sheet in drawing.sheets)
         pages_with_input = {entity.page for entity in drawing.entities}
@@ -111,3 +121,27 @@ class ConversionPipeline:
             + "\n",
             encoding="utf-8",
         )
+        ocr_entities = [
+            {
+                "id": entity.id,
+                "page": entity.page,
+                "text": entity.geometry.text,
+                "insertion": {
+                    "x": entity.geometry.insertion.x,
+                    "y": entity.geometry.insertion.y,
+                },
+                "height": entity.geometry.height,
+                "width": entity.geometry.width,
+                "confidence": entity.confidence,
+                "metadata": entity.metadata,
+            }
+            for entity in drawing.entities
+            if isinstance(entity.geometry, TextGeometry)
+            and entity.source is not None
+            and entity.source.parser == "tesseract_ocr"
+        ]
+        if ocr_entities:
+            (debug_dir / "ocr_entities.json").write_text(
+                json.dumps(ocr_entities, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )

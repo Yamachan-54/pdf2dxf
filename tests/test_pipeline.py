@@ -15,17 +15,19 @@ from pdf2dxf.cad.model import (
     CadPolyline, CadText, build_cad_model,
 )
 from pdf2dxf.cli import main
-from pdf2dxf.converter import convert_pdf
+from pdf2dxf.converter import ConversionError, convert_pdf
 from pdf2dxf.config import DxfExportConfig
 from pdf2dxf.exporters.dxf import DxfExporter, LayerPolicy
 from pdf2dxf.geometry import Point, Segment
 from pdf2dxf.geometry.reconstruction import PrimitiveReconstructor
 from pdf2dxf.input.vector_pdf import VectorPdfParser
+from pdf2dxf.input.ocr import TesseractOcrAdapter, TesseractOcrConfig
 from pdf2dxf.interpreter.classifier import SemanticClassifier
 from pdf2dxf.interpreter.dimensions import DimensionInterpreter
 from pdf2dxf.ir.drawing import Drawing, Sheet
 from pdf2dxf.ir.entities import (
     CircleGeometry, Entity, LineGeometry, SemanticType, SourceEvidence, Style,
+    TextGeometry,
 )
 from pdf2dxf.sheet.analyzer import SheetAnalyzer
 from pdf2dxf.views.detector import ViewDetector
@@ -345,6 +347,18 @@ class PipelineTests(unittest.TestCase):
                 Entity(
                     "HOLE", "circle", CircleGeometry(Point(50, 120), 5), page=1,
                 ),
+                Entity(
+                    "DIM_TEXT", "text",
+                    TextGeometry("100", Point(67, 52), 2, width=6), page=1,
+                ),
+                Entity(
+                    "OTHER_TEXT", "text",
+                    TextGeometry("303", Point(67, 100), 2, width=6), page=1,
+                ),
+                Entity(
+                    "VARIABLE_TEXT", "text",
+                    TextGeometry("W2", Point(77, 52), 2, width=6), page=1,
+                ),
             ],
         )
 
@@ -358,6 +372,22 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(semantics["EXT1"], SemanticType.DIMENSION_EXTENSION_LINE)
         self.assertEqual(semantics["EXT2"], SemanticType.DIMENSION_EXTENSION_LINE)
         self.assertEqual(semantics["HOLE"], SemanticType.HOLE)
+        self.assertEqual(semantics["DIM_TEXT"], SemanticType.DIMENSION_TEXT)
+        self.assertEqual(semantics["VARIABLE_TEXT"], SemanticType.DIMENSION_TEXT)
+        self.assertEqual(semantics["OTHER_TEXT"], SemanticType.TEXT)
+        self.assertEqual(
+            next(
+                entity for entity in drawing.entities if entity.id == "DIM_TEXT"
+            ).metadata["parsed_dimension_value"],
+            100.0,
+        )
+        self.assertNotIn(
+            "parsed_dimension_value",
+            next(
+                entity for entity in drawing.entities
+                if entity.id == "VARIABLE_TEXT"
+            ).metadata,
+        )
         self.assertEqual(
             drawing.metadata["dimension_analysis"],
             {
@@ -365,6 +395,7 @@ class PipelineTests(unittest.TestCase):
                 "marker_entities": 2,
                 "dimension_line_entities": 1,
                 "extension_line_entities": 2,
+                "dimension_text_entities": 2,
             },
         )
 
@@ -378,8 +409,48 @@ class PipelineTests(unittest.TestCase):
             line_layers = Counter(
                 entity.dxf.layer for entity in document.modelspace().query("LINE")
             )
+            text_layers = Counter(
+                entity.dxf.layer for entity in document.modelspace().query("TEXT")
+            )
         self.assertEqual(circle_layers, Counter({"DIMENSION": 2, "GEOMETRY": 1}))
         self.assertEqual(line_layers, Counter({"DIMENSION": 3}))
+        self.assertEqual(text_layers, Counter({"DIMENSION": 2, "TEXT": 1}))
+
+    def test_tesseract_tsv_is_mapped_to_sheet_text_geometry(self) -> None:
+        tsv = (
+            "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+            "5\t1\t2\t1\t3\t1\t100\t50\t200\t25\t95.5\t460\n"
+            "5\t1\t2\t1\t3\t2\t320\t50\t100\t25\t60.0\tignored\n"
+        )
+        adapter = TesseractOcrAdapter(
+            TesseractOcrConfig(minimum_confidence=70)
+        )
+
+        entities = adapter.entities_from_tsv(
+            tsv, page_number=1,
+            sheet=Sheet("SHEET_001", 1, (10, 20, 210, 120)),
+            image_width=1000, image_height=500,
+        )
+
+        self.assertEqual(len(entities), 1)
+        entity = entities[0]
+        self.assertEqual(entity.id, "OCR_P001_00001")
+        self.assertEqual(entity.semantic_type, SemanticType.TEXT)
+        self.assertEqual(entity.source.parser, "tesseract_ocr")
+        self.assertEqual(entity.geometry.text, "460")
+        self.assertEqual(entity.geometry.insertion, Point(30, 105))
+        self.assertEqual(entity.geometry.width, 40)
+        self.assertEqual(entity.geometry.height, 5)
+        self.assertAlmostEqual(entity.confidence, 0.955)
+
+    def test_invalid_ocr_options_are_rejected_before_conversion(self) -> None:
+        with self.assertRaisesRegex(ConversionError, "OCR DPI"):
+            convert_pdf(Path("unused.pdf"), Path("unused.dxf"), ocr=True, ocr_dpi=71)
+        with self.assertRaisesRegex(ConversionError, "OCR minimum confidence"):
+            convert_pdf(
+                Path("unused.pdf"), Path("unused.dxf"),
+                ocr=True, ocr_min_confidence=101,
+            )
 
     def test_closed_short_line_chain_is_reconstructed_as_circle(self) -> None:
         source = SourceEvidence("test", 1)
