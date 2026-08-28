@@ -34,8 +34,9 @@ Raster/OCR and constraint solving also had no extension points.
 
 The implemented electronic-PDF path is:
 
-`VectorPdfParser -> Drawing IR -> SheetAnalyzer -> ViewDetector ->`
-`PrimitiveReconstructor -> SemanticClassifier -> CAD Model -> DxfExporter`.
+`VectorPdfParser -> Drawing IR -> PrimitiveReconstructor ->`
+`SemanticClassifier -> DimensionInterpreter -> SheetAnalyzer -> ViewDetector ->`
+`CAD Model -> DxfExporter`.
 
 The parser preserves native lines, rectangles, quads, cubic Beziers and text in
 one IR. Reconstruction changes IR entities, never PDF objects. The raster parser,
@@ -44,14 +45,20 @@ or consume the same IR without changing the exporter.
 
 ## 6. Module structure
 
-- `input/vector_pdf.py`: PyMuPDF adapter and source-coordinate normalization.
+- `input/vector_pdf.py`: PyMuPDF adapter, page-rotation handling and displayed
+  sheet-coordinate normalization.
 - `input/raster_pdf.py`: future raster/OCR parser interface.
 - `ir/`: serializable drawing, sheet, view, entity, feature and constraint types.
-- `sheet/analyzer.py`: conservative border and title-block candidates.
-- `views/detector.py`: connected-component spatial clustering into view regions.
+- `sheet/analyzer.py`: conservative border and full-height title-block separation.
+- `views/detector.py`: connected components for small drawings and major-geometry
+  XY-cut clustering for outline-heavy dense drawings.
 - `geometry/fitting.py`: line/circle/arc fitting helpers.
 - `geometry/reconstruction.py`: safe primitive reconstruction.
 - `interpreter/classifier.py`: semantic type to meaning, independent of DXF.
+- `interpreter/line_patterns.py`: conservative expanded long-dot centerline
+  recognition, independent of DXF.
+- `interpreter/dimensions.py`: conservative separation of paired dimension-dot
+  markers, dimension lines and extension lines from manufacturing geometry.
 - `cad/model.py`: export-oriented analytic CAD entities.
 - `exporters/dxf.py`: ezdxf adapter and semantic layer/resource mapping.
 - `pipeline.py`: stage orchestration, JSON/debug output and page layout.
@@ -110,8 +117,19 @@ present but intentionally do not claim automatic interpretation.
 Unit tests cover page parsing, geometry sampling/fitting, IR serialization,
 semantic layer mapping and each DXF entity encoder. Generated vector PDFs verify
 native LINE, CIRCLE, ARC and TEXT reconstruction, border separation, view
-assignment, `--dump-ir`, debug JSON and regression CLI behavior. A real tracked
-PDF is used only as a smoke test because its content is not a stable unit fixture.
+assignment, rotated-page coordinates, degenerate-line removal, expanded
+centerline recognition, graphical dimension separation, dense XY-cut grouping,
+`--dump-ir`, debug JSON and
+regression CLI behavior. A real tracked PDF is used as an acceptance smoke test
+because its detailed content is not a stable unit fixture.
+
+The tracked A3 landscape sample also exercises a portrait MediaBox with
+`/Rotate 90`. Its current smoke-test baseline is native DXF round-trip with no
+audit errors, no zero-length LINE, explicit CENTER-layer entities, and multiple
+major drawing views. Paired dot-ended graphical dimensions are separated onto
+the DIMENSION layer, while unmatched analytic circles remain manufacturing-hole
+candidates. The PDF contains no native text objects, so dimension values cannot
+be promoted safely to native DIMENSION entities until an OCR adapter is introduced.
 
 ## 13. Dependencies
 

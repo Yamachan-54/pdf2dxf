@@ -33,7 +33,13 @@ class ViewDetector:
             sheet_width = sheet.bbox[2] - sheet.bbox[0]
             sheet_height = sheet.bbox[3] - sheet.bbox[1]
             padding = min(sheet_width, sheet_height) * 0.015
-            groups = self._components(candidates, padding)
+            if len(candidates) > 500:
+                region = sheet.metadata.get("drawing_area_bbox", sheet.bbox)
+                groups = self._dense_drawing_components(
+                    candidates, tuple(float(value) for value in region)
+                )
+            else:
+                groups = self._components(candidates, padding)
             for group in groups:
                 view_id = f"VIEW_{len(drawing.views) + 1:03d}"
                 bbox = _merged_bbox([_entity_bbox(entity) for entity in group])
@@ -42,6 +48,101 @@ class ViewDetector:
                 for entity in group:
                     entity.view = view_id
         return drawing
+
+    @staticmethod
+    def _dense_drawing_components(
+        entities: list[Entity], sheet_bbox: tuple[float, float, float, float]
+    ) -> list[list[Entity]]:
+        """Use major geometry as view anchors in outline-text-heavy PDFs."""
+        sx0, sy0, sx1, sy1 = sheet_bbox
+        width, height = sx1 - sx0, sy1 - sy0
+        scale = min(width, height)
+        horizontal_margin = scale * 0.06
+        bottom_margin = scale * 0.25
+        top_margin = scale * 0.09
+        anchors = []
+        for entity in entities:
+            bbox = _entity_bbox(entity)
+            center = _bbox_center(bbox)
+            extent = ((bbox[2] - bbox[0]) ** 2 + (bbox[3] - bbox[1]) ** 2) ** 0.5
+            if (
+                extent >= scale * 0.03
+                and sx0 + horizontal_margin <= center[0] <= sx1 - horizontal_margin
+                and sy0 + bottom_margin <= center[1] <= sy1 - top_margin
+            ):
+                anchors.append(entity)
+        if len(anchors) < 20:
+            return ViewDetector._grid_components(entities, max(scale * 0.06, 1e-9))
+
+        anchor_groups = ViewDetector._xy_cut(
+            anchors, width, height, scale * 0.045, depth=0
+        )
+        if len(anchor_groups) <= 1:
+            return ViewDetector._grid_components(entities, max(scale * 0.06, 1e-9))
+
+        cores = [
+            _merged_bbox([_center_bbox(entity) for entity in group])
+            for group in anchor_groups
+        ]
+        assigned: list[list[Entity]] = [[] for _group in anchor_groups]
+        assignment_distance = scale * 0.03
+        for entity in entities:
+            center = _bbox_center(_entity_bbox(entity))
+            distances = [_point_box_distance(center, core) for core in cores]
+            nearest = min(range(len(distances)), key=distances.__getitem__)
+            if distances[nearest] <= assignment_distance:
+                assigned[nearest].append(entity)
+        return [group for group in assigned if group]
+
+    @staticmethod
+    def _xy_cut(
+        entities: list[Entity], sheet_width: float, sheet_height: float,
+        minimum_gap: float, *, depth: int,
+    ) -> list[list[Entity]]:
+        if depth >= 2 or len(entities) < 20:
+            return [entities]
+        centers = [(_bbox_center(_entity_bbox(entity)), entity) for entity in entities]
+        choices: list[tuple[float, str, float, float]] = []
+        for axis, dimension in ((0, sheet_width), (1, sheet_height)):
+            values = sorted({round(center[axis], 6) for center, _entity in centers})
+            if len(values) < 2:
+                continue
+            for index in range(len(values) - 1):
+                split = (values[index + 1] + values[index]) / 2
+                left_count = sum(center[axis] <= split for center, _entity in centers)
+                right_count = len(centers) - left_count
+                if min(left_count, right_count) < 10:
+                    continue
+                gap = values[index + 1] - values[index]
+                balance = min(left_count, right_count) / len(centers)
+                choices.append(
+                    (
+                        gap / max(dimension, 1e-12) * balance ** 0.5,
+                        "x" if axis == 0 else "y", split, gap,
+                    )
+                )
+        if not choices:
+            return [entities]
+        preferred_axis = "y" if depth == 0 else "x"
+        preferred = [
+            choice for choice in choices
+            if choice[1] == preferred_axis
+            and choice[3] >= minimum_gap
+        ]
+        _score, axis, split, gap = max(preferred or choices)
+        axis_index = 0 if axis == "x" else 1
+        if gap < minimum_gap:
+            return [entities]
+        left = [entity for center, entity in centers if center[axis_index] <= split]
+        right = [entity for center, entity in centers if center[axis_index] > split]
+        return (
+            ViewDetector._xy_cut(
+                left, sheet_width, sheet_height, minimum_gap, depth=depth + 1
+            )
+            + ViewDetector._xy_cut(
+                right, sheet_width, sheet_height, minimum_gap, depth=depth + 1
+            )
+        )
 
     @staticmethod
     def _components(entities: list[Entity], padding: float) -> list[list[Entity]]:
@@ -136,3 +237,23 @@ def _boxes_touch(first: tuple[float, float, float, float], second: tuple[float, 
 
 def _merged_bbox(boxes: list[tuple[float, float, float, float]]) -> tuple[float, float, float, float]:
     return min(box[0] for box in boxes), min(box[1] for box in boxes), max(box[2] for box in boxes), max(box[3] for box in boxes)
+
+
+def _bbox_center(
+    bbox: tuple[float, float, float, float]
+) -> tuple[float, float]:
+    return (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+
+
+def _center_bbox(entity: Entity) -> tuple[float, float, float, float]:
+    x, y = _bbox_center(_entity_bbox(entity))
+    return x, y, x, y
+
+
+def _point_box_distance(
+    point: tuple[float, float], bbox: tuple[float, float, float, float]
+) -> float:
+    x, y = point
+    dx = max(bbox[0] - x, 0.0, x - bbox[2])
+    dy = max(bbox[1] - y, 0.0, y - bbox[3])
+    return (dx * dx + dy * dy) ** 0.5

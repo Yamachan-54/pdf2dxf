@@ -63,9 +63,14 @@ class VectorPdfParser:
                 height_pt = float(page.rect.height)
                 width = float(page.rect.width) * factor
                 height = height_pt * factor
+                rotation_matrix = tuple(float(value) for value in page.rotation_matrix)
                 page_number = page_index + 1
                 drawing.sheets.append(
-                    Sheet(f"SHEET_{page_number:03d}", page_number, (offset_x, offset_y, offset_x + width, offset_y + height))
+                    Sheet(
+                        f"SHEET_{page_number:03d}", page_number,
+                        (offset_x, offset_y, offset_x + width, offset_y + height),
+                        metadata={"pdf_rotation": int(page.rotation)},
+                    )
                 )
                 for object_index, native in enumerate(page.get_drawings()):
                     style = Style(
@@ -82,15 +87,15 @@ class VectorPdfParser:
                         primitive = operation
                         if operation == "l":
                             geometry = LineGeometry(
-                                self._point(item[1], factor, height_pt, offset_x, offset_y),
-                                self._point(item[2], factor, height_pt, offset_x, offset_y),
+                                self._point(item[1], rotation_matrix, factor, height_pt, offset_x, offset_y),
+                                self._point(item[2], rotation_matrix, factor, height_pt, offset_x, offset_y),
                             )
                             primitive = "line"
                         elif operation == "re":
                             rect = item[1]
                             geometry = PolylineGeometry(
                                 tuple(
-                                    self._xy(x, y, factor, height_pt, offset_x, offset_y)
+                                    self._xy(x, y, rotation_matrix, factor, height_pt, offset_x, offset_y)
                                     for x, y in ((rect.x0, rect.y0), (rect.x1, rect.y0), (rect.x1, rect.y1), (rect.x0, rect.y1))
                                 ),
                                 True,
@@ -99,13 +104,13 @@ class VectorPdfParser:
                         elif operation == "qu":
                             quad = item[1]
                             geometry = PolylineGeometry(
-                                tuple(self._point(value, factor, height_pt, offset_x, offset_y) for value in (quad.ul, quad.ur, quad.lr, quad.ll)),
+                                tuple(self._point(value, rotation_matrix, factor, height_pt, offset_x, offset_y) for value in (quad.ul, quad.ur, quad.lr, quad.ll)),
                                 True,
                             )
                             primitive = "polyline"
                         elif operation == "c":
                             control_points = tuple(
-                                self._point(value, factor, height_pt, offset_x, offset_y)
+                                self._point(value, rotation_matrix, factor, height_pt, offset_x, offset_y)
                                 for value in item[1:5]
                             )
                             geometry = BezierGeometry(control_points, path_id)  # type: ignore[arg-type]
@@ -124,12 +129,18 @@ class VectorPdfParser:
                         continue
                     for line_index, line in enumerate(block.get("lines", [])):
                         direction = line.get("dir", (1.0, 0.0))
-                        rotation = degrees(atan2(-float(direction[1]), float(direction[0])))
+                        direction_x, direction_y = self._transform_vector(
+                            float(direction[0]), float(direction[1]), rotation_matrix
+                        )
+                        rotation = degrees(atan2(-direction_y, direction_x))
                         for span_index, span in enumerate(line.get("spans", [])):
                             text = str(span.get("text", ""))
                             if not text:
                                 continue
-                            insertion = self._xy(*span["origin"], factor, height_pt, offset_x, offset_y)
+                            insertion = self._xy(
+                                *span["origin"], rotation_matrix, factor,
+                                height_pt, offset_x, offset_y,
+                            )
                             bbox = span.get("bbox")
                             width_hint = (float(bbox[2]) - float(bbox[0])) * factor if bbox else None
                             drawing.entities.append(
@@ -154,12 +165,40 @@ class VectorPdfParser:
         return drawing
 
     @staticmethod
-    def _xy(x: float, y: float, factor: float, page_height: float, offset_x: float, offset_y: float) -> Point:
-        return Point(float(x) * factor + offset_x, (page_height - float(y)) * factor + offset_y)
+    def _xy(
+        x: float, y: float, matrix: tuple[float, ...], factor: float,
+        page_height: float, offset_x: float, offset_y: float,
+    ) -> Point:
+        transformed_x, transformed_y = VectorPdfParser._transform_xy(
+            float(x), float(y), matrix
+        )
+        return Point(
+            transformed_x * factor + offset_x,
+            (page_height - transformed_y) * factor + offset_y,
+        )
 
     @classmethod
-    def _point(cls, value: Any, factor: float, page_height: float, offset_x: float, offset_y: float) -> Point:
-        return cls._xy(value.x, value.y, factor, page_height, offset_x, offset_y)
+    def _point(
+        cls, value: Any, matrix: tuple[float, ...], factor: float,
+        page_height: float, offset_x: float, offset_y: float,
+    ) -> Point:
+        return cls._xy(
+            value.x, value.y, matrix, factor, page_height, offset_x, offset_y
+        )
+
+    @staticmethod
+    def _transform_xy(
+        x: float, y: float, matrix: tuple[float, ...]
+    ) -> tuple[float, float]:
+        a, b, c, d, e, f = matrix
+        return a * x + c * y + e, b * x + d * y + f
+
+    @staticmethod
+    def _transform_vector(
+        x: float, y: float, matrix: tuple[float, ...]
+    ) -> tuple[float, float]:
+        a, b, c, d, _e, _f = matrix
+        return a * x + c * y, b * x + d * y
 
     @staticmethod
     def _text_color(value: int | None) -> int | None:

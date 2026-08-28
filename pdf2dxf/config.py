@@ -6,6 +6,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class ReconstructionConfig:
     endpoint_tolerance: float = 1e-5
+    minimum_line_length: float = 1e-8
     line_collinearity_tolerance: float = 1e-5
     circle_relative_error: float = 0.002
     circle_absolute_error: float = 0.02

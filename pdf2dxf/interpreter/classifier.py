@@ -4,12 +4,22 @@ import re
 
 from ..ir.drawing import Drawing
 from ..ir.entities import SemanticType, TextGeometry
+from .line_patterns import detect_segmented_centerlines
 
 
 class SemanticClassifier:
     """Conservative rule baseline; uncertain evidence remains low-confidence."""
 
     def classify(self, drawing: Drawing) -> Drawing:
+        for pattern_index, entities in enumerate(
+            detect_segmented_centerlines(drawing), start=1
+        ):
+            pattern_id = f"CENTER_PATTERN_{pattern_index:03d}"
+            for entity in entities:
+                entity.semantic_type = SemanticType.CENTER_LINE
+                entity.confidence = 0.85
+                entity.metadata["semantic_evidence"] = "segmented_centerline"
+                entity.metadata["centerline_pattern"] = pattern_id
         for entity in drawing.entities:
             if entity.semantic_type != SemanticType.UNKNOWN:
                 continue

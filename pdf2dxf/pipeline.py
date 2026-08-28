@@ -13,6 +13,7 @@ from .geometry.reconstruction import PrimitiveReconstructor
 from .geometry.solver import PassthroughSolver
 from .input.vector_pdf import VectorPdfParser
 from .interpreter.classifier import SemanticClassifier
+from .interpreter.dimensions import DimensionInterpreter
 from .ir.drawing import Drawing
 from .sheet.analyzer import SheetAnalyzer
 from .views.detector import ViewDetector
@@ -41,6 +42,7 @@ class ConversionPipeline:
         self.parser = VectorPdfParser()
         self.reconstructor = PrimitiveReconstructor(config)
         self.classifier = SemanticClassifier()
+        self.dimension_interpreter = DimensionInterpreter()
         self.sheet_analyzer = SheetAnalyzer()
         self.view_detector = ViewDetector()
         self.solver = PassthroughSolver()
@@ -63,6 +65,7 @@ class ConversionPipeline:
         drawing = self.reconstructor.reconstruct(drawing)
         reconstructed_json = drawing.to_json()
         drawing = self.classifier.classify(drawing)
+        drawing = self.dimension_interpreter.analyze(drawing)
         drawing = self.sheet_analyzer.analyze(drawing)
         drawing = self.view_detector.detect(drawing)
         drawing = self.solver.solve(drawing)

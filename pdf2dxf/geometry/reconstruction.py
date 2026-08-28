@@ -47,8 +47,33 @@ class PrimitiveReconstructor:
             index = cursor
         output = self._reconstruct_line_chains(output)
         output = self._deduplicate_lines(output)
+        output, dropped = self._drop_degenerate_lines(output)
         drawing.entities = self._merge_collinear_lines(output)
+        if dropped:
+            stats = dict(drawing.metadata.get("reconstruction_stats", {}))
+            stats["dropped_degenerate_lines"] = int(
+                stats.get("dropped_degenerate_lines", 0)
+            ) + dropped
+            drawing.metadata["reconstruction_stats"] = stats
         return drawing
+
+    def _drop_degenerate_lines(
+        self, entities: list[Entity]
+    ) -> tuple[list[Entity], int]:
+        from ..ir.entities import LineGeometry
+
+        result: list[Entity] = []
+        dropped = 0
+        for entity in entities:
+            geometry = entity.geometry
+            if isinstance(geometry, LineGeometry) and hypot(
+                geometry.end.x - geometry.start.x,
+                geometry.end.y - geometry.start.y,
+            ) <= self.config.minimum_line_length:
+                dropped += 1
+                continue
+            result.append(entity)
+        return result, dropped
 
     @staticmethod
     def _deduplicate_lines(entities: list[Entity]) -> list[Entity]:

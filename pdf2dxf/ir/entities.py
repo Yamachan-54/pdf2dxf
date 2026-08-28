@@ -15,6 +15,7 @@ class SemanticType(str, Enum):
     HIDDEN_LINE = "hidden_line"
     DIMENSION_LINE = "dimension_line"
     DIMENSION_EXTENSION_LINE = "dimension_extension_line"
+    DIMENSION_MARKER = "dimension_marker"
     CONSTRUCTION_LINE = "construction_line"
     TEXT = "text"
     DIMENSION_TEXT = "dimension_text"

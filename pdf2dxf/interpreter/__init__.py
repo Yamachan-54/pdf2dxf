@@ -1,3 +1,4 @@
 from .classifier import SemanticClassifier
+from .dimensions import DimensionInterpreter
 
-__all__ = ["SemanticClassifier"]
+__all__ = ["DimensionInterpreter", "SemanticClassifier"]

@@ -12,8 +12,13 @@ DXFのシリアライズ、Layer、LineType、Text Style、Dimension Style管理
 - 復元できない曲線を安全に `LWPOLYLINE` へフォールバック
 - PDFネイティブ文字を `TEXT`（CAD Model/DXF Exporterは `MTEXT` にも対応）として保持
 - 連続する同一直線上の短い線を1本の `LINE` へ統合
+- PDFの `/Rotate` を正規化し、回転ページも表示上のSheet座標へ変換
+- PDF側で分割された長線・短点の交互パターンを保守的に中心線として復元
+- ペアになった小円端点と接続線から寸法図形を検出し、加工穴・加工線と分離
+- ゼロ長 `LINE` を除外し、除外数をDrawing IRの再構成統計へ記録
 - Drawing IR、Sheet、View、Feature、Dimension、Constraintの拡張可能なデータモデル
-- 図面外枠・表題欄候補を製品形状と分離
+- 図面外枠・全高セパレータ付き表題欄を製品形状と分離
+- 文字輪郭の多い高密度図面では主要形状をアンカーにXY分割してViewを検出
 - 意味とViewを分離し、意味をDXFレイヤーへ出力時にマッピング
 - 解決済みの線形寸法をネイティブ `DIMENSION` として出力
 - `CadExporter`境界とCAD Entity単位のezdxf Handler
@@ -101,7 +106,7 @@ Drawing IRの `semantic_type` は、DXF出力時に次のレイヤーへマッ�
 | `GEOMETRY` | 外形、内形、穴、形状線 |
 | `HIDDEN` | 隠れ線 |
 | `CENTER` | 中心線 |
-| `DIMENSION` | 寸法、寸法線、寸法補助線 |
+| `DIMENSION` | 寸法、寸法線、寸法補助線、寸法端点記号 |
 | `TEXT` | 通常文字、注記 |
 | `HATCH` | ハッチング |
 | `REFERENCE` | 図面枠、表題欄、補助図形、未確定要素 |
@@ -133,7 +138,9 @@ DXF Versionは広い互換性とネイティブEntity対応のバランスから
 - アウトライン化された文字はネイティブ文字として取得できません。将来のOCR Adapterへ接続する構造のみ用意しています。
 - 塗りつぶし、線種、線幅、クリッピングマスクはDXFへ保持せず、輪郭線を出力します。
 - 意味分類は保守的な初期ルールです。投影図種別、寸法解釈、View間Feature対応、Constraint Solverは今後のPhaseです。
+- 分割線からの中心線認識は、軸平行・等間隔・長短交互の明確なパターンだけを対象とします。斜め中心線など不確実なものは形状線のまま残します。
 - 定義点と寸法線位置が揃った線形寸法だけをネイティブ `DIMENSION`へ変換します。情報不足の寸法は誤ったEntityを作らず、`dxf_export.json`へ `unresolved`として記録します。
+- 文字値を復元できない寸法図形でも、同径小円のペア、点間の線、直交する補助線をそれぞれ `dimension_marker`、`dimension_line`、`dimension_extension_line` としてDrawing IRに保持し、`DIMENSION` Layerへ分離します。この段階では推測したネイティブ `DIMENSION` Entityにはしません。
 - HATCH、BLOCK、INSERTのIR/CAD Modelは未実装です。ExporterのEntity Handler登録へ追加できる構造です。
 - 円/円弧フィッティングが閾値を満たさないベジェは、誤認識を避けて `LWPOLYLINE` として残します。
 
@@ -147,5 +154,6 @@ python -m unittest discover -s tests -v
 
 テストでは生成した電子PDFを使い、LINE、CIRCLE、ARC、TEXT、MTEXT、DIMENSION、
 意味レイヤー、CENTER/HIDDEN LineType、mm/inch/pt単位、図面枠/表題欄分離、
+回転ページ座標、ゼロ長線除外、分割中心線、寸法図形と加工形状の分離、高密度View分離、
 Drawing IR JSON、Debug出力、既存CLI互換性を検証します。DXFはezdxfで再読込し、
 監査とEntity単位のラウンドトリップ検証を行います。

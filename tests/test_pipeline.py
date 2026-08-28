@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from math import cos, pi, sin
 from pathlib import Path
 import re
@@ -11,7 +12,7 @@ import ezdxf
 
 from pdf2dxf.cad.model import (
     CadArc, CadCircle, CadDimension, CadLine, CadModel, CadMText,
-    CadPolyline, CadText,
+    CadPolyline, CadText, build_cad_model,
 )
 from pdf2dxf.cli import main
 from pdf2dxf.converter import convert_pdf
@@ -19,10 +20,15 @@ from pdf2dxf.config import DxfExportConfig
 from pdf2dxf.exporters.dxf import DxfExporter, LayerPolicy
 from pdf2dxf.geometry import Point, Segment
 from pdf2dxf.geometry.reconstruction import PrimitiveReconstructor
-from pdf2dxf.ir.drawing import Drawing
+from pdf2dxf.input.vector_pdf import VectorPdfParser
+from pdf2dxf.interpreter.classifier import SemanticClassifier
+from pdf2dxf.interpreter.dimensions import DimensionInterpreter
+from pdf2dxf.ir.drawing import Drawing, Sheet
 from pdf2dxf.ir.entities import (
-    Entity, LineGeometry, SemanticType, SourceEvidence, Style,
+    CircleGeometry, Entity, LineGeometry, SemanticType, SourceEvidence, Style,
 )
+from pdf2dxf.sheet.analyzer import SheetAnalyzer
+from pdf2dxf.views.detector import ViewDetector
 
 
 def _make_feature_pdf(path: Path) -> None:
@@ -157,6 +163,223 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(reconstructed.entities), 1)
         geometry = reconstructed.entities[0].geometry
         self.assertEqual(geometry, LineGeometry(Point(0, 0), Point(10, 0)))
+
+    def test_degenerate_native_lines_are_dropped_and_reported(self) -> None:
+        source = SourceEvidence("test", 1)
+        drawing = Drawing(
+            "mm",
+            entities=[
+                Entity(
+                    "ZERO", "line", LineGeometry(Point(3, 4), Point(3, 4)),
+                    source=source, page=1,
+                ),
+                Entity(
+                    "VALID", "line", LineGeometry(Point(0, 0), Point(5, 0)),
+                    source=source, page=1,
+                ),
+            ],
+        )
+
+        reconstructed = PrimitiveReconstructor().reconstruct(drawing)
+
+        self.assertEqual([entity.id for entity in reconstructed.entities], ["VALID"])
+        self.assertEqual(
+            reconstructed.metadata["reconstruction_stats"]["dropped_degenerate_lines"],
+            1,
+        )
+
+    def test_rotated_pdf_coordinates_are_normalized_to_displayed_page(self) -> None:
+        import pymupdf
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "rotated.pdf"
+            document = pymupdf.open()
+            page = document.new_page(width=100, height=200)
+            shape = page.new_shape()
+            shape.draw_line((10, 20), (30, 20))
+            shape.finish(color=(0, 0, 0))
+            shape.commit()
+            page.set_rotation(90)
+            document.save(source)
+            document.close()
+
+            drawing = VectorPdfParser().parse(
+                source, pages=None, unit="pt", factor=1.0,
+                layout="overlay", page_gap=0.0,
+            )
+
+        self.assertEqual(drawing.sheets[0].bbox, (0.0, 0.0, 200.0, 100.0))
+        self.assertEqual(drawing.sheets[0].metadata["pdf_rotation"], 90)
+        geometry = drawing.entities[0].geometry
+        self.assertIsInstance(geometry, LineGeometry)
+        self.assertEqual(geometry, LineGeometry(Point(180, 90), Point(180, 70)))
+        for point in (geometry.start, geometry.end):
+            self.assertGreaterEqual(point.x, 0)
+            self.assertLessEqual(point.x, 200)
+            self.assertGreaterEqual(point.y, 0)
+            self.assertLessEqual(point.y, 100)
+
+    def test_explicit_long_dot_chain_is_classified_as_centerline(self) -> None:
+        lengths = [12.0, 0.5, 10.0, 0.5, 10.0, 0.5, 8.0]
+        entities = []
+        cursor = 20.0
+        for index, length in enumerate(lengths):
+            entities.append(
+                Entity(
+                    f"CENTER_{index}", "line",
+                    LineGeometry(Point(cursor, 50), Point(cursor + length, 50)),
+                    source=SourceEvidence("test", 1), page=1,
+                )
+            )
+            cursor += length + 1.0
+        # Equal-length repeated marks are not a long-dot center pattern.
+        cursor = 20.0
+        for index in range(5):
+            entities.append(
+                Entity(
+                    f"OTHER_{index}", "line",
+                    LineGeometry(Point(cursor, 70), Point(cursor + 3, 70)),
+                    source=SourceEvidence("test", 1), page=1,
+                )
+            )
+            cursor += 4.0
+        drawing = Drawing(
+            "mm", sheets=[Sheet("SHEET_001", 1, (0, 0, 200, 100))],
+            entities=entities,
+        )
+
+        classified = SemanticClassifier().classify(drawing)
+
+        center = [entity for entity in classified.entities if entity.id.startswith("CENTER_")]
+        other = [entity for entity in classified.entities if entity.id.startswith("OTHER_")]
+        self.assertEqual({entity.semantic_type for entity in center}, {SemanticType.CENTER_LINE})
+        self.assertEqual({entity.metadata["semantic_evidence"] for entity in center}, {"segmented_centerline"})
+        self.assertEqual({entity.semantic_type for entity in other}, {SemanticType.OUTER_CONTOUR})
+
+    def test_full_height_title_separator_defines_drawing_area(self) -> None:
+        entities = [
+            Entity(
+                "DRAWING", "line", LineGeometry(Point(20, 50), Point(80, 50)),
+                page=1,
+            ),
+            Entity(
+                "SEPARATOR", "line", LineGeometry(Point(160, 5), Point(160, 95)),
+                page=1,
+            ),
+            Entity(
+                "TITLE_1", "line", LineGeometry(Point(170, 20), Point(190, 20)),
+                page=1,
+            ),
+            Entity(
+                "TITLE_2", "line", LineGeometry(Point(170, 40), Point(190, 40)),
+                page=1,
+            ),
+        ]
+        drawing = Drawing(
+            "mm", sheets=[Sheet("SHEET_001", 1, (0, 0, 200, 100))],
+            entities=entities,
+        )
+
+        analyzed = SheetAnalyzer().analyze(drawing)
+
+        sheet = analyzed.sheets[0]
+        self.assertEqual(sheet.metadata["title_block_separator_x"], 160)
+        self.assertEqual(sheet.metadata["drawing_area_bbox"], (0, 0, 160, 100))
+        self.assertEqual(
+            {entity.id for entity in analyzed.entities if entity.semantic_type == SemanticType.TITLE_BLOCK_LINE},
+            {"SEPARATOR", "TITLE_1", "TITLE_2"},
+        )
+        self.assertEqual(analyzed.entities[0].semantic_type, SemanticType.UNKNOWN)
+
+    def test_xy_cut_separates_four_dense_drawing_regions(self) -> None:
+        entities = []
+        for group_x in (20.0, 120.0):
+            for group_y in (20.0, 80.0):
+                for index in range(15):
+                    x = group_x + index % 5
+                    y = group_y + index // 5
+                    entities.append(
+                        Entity(
+                            f"E{len(entities)}", "line",
+                            LineGeometry(Point(x, y), Point(x + 10, y)), page=1,
+                        )
+                    )
+
+        groups = ViewDetector._xy_cut(
+            entities, sheet_width=200, sheet_height=120,
+            minimum_gap=10, depth=0,
+        )
+
+        self.assertEqual(len(groups), 4)
+        self.assertEqual(sorted(len(group) for group in groups), [15, 15, 15, 15])
+
+    def test_dimension_dots_and_linework_are_separated_from_holes(self) -> None:
+        marker_metadata = {
+            "reconstruction": "circle_from_lines",
+            "source_entities": [f"S{index}" for index in range(20)],
+        }
+        drawing = Drawing(
+            "mm",
+            sheets=[Sheet("SHEET_001", 1, (0, 0, 200, 200))],
+            entities=[
+                Entity(
+                    "M1", "circle", CircleGeometry(Point(20, 50), 0.5),
+                    page=1, metadata=dict(marker_metadata),
+                ),
+                Entity(
+                    "M2", "circle", CircleGeometry(Point(120, 50), 0.5),
+                    page=1, metadata=dict(marker_metadata),
+                ),
+                Entity(
+                    "DIM", "line", LineGeometry(Point(20.5, 50), Point(119.5, 50)),
+                    page=1,
+                ),
+                Entity(
+                    "EXT1", "line", LineGeometry(Point(20, 50.5), Point(20, 70)),
+                    page=1,
+                ),
+                Entity(
+                    "EXT2", "line", LineGeometry(Point(120, 50.5), Point(120, 70)),
+                    page=1,
+                ),
+                Entity(
+                    "HOLE", "circle", CircleGeometry(Point(50, 120), 5), page=1,
+                ),
+            ],
+        )
+
+        drawing = SemanticClassifier().classify(drawing)
+        drawing = DimensionInterpreter().analyze(drawing)
+
+        semantics = {entity.id: entity.semantic_type for entity in drawing.entities}
+        self.assertEqual(semantics["M1"], SemanticType.DIMENSION_MARKER)
+        self.assertEqual(semantics["M2"], SemanticType.DIMENSION_MARKER)
+        self.assertEqual(semantics["DIM"], SemanticType.DIMENSION_LINE)
+        self.assertEqual(semantics["EXT1"], SemanticType.DIMENSION_EXTENSION_LINE)
+        self.assertEqual(semantics["EXT2"], SemanticType.DIMENSION_EXTENSION_LINE)
+        self.assertEqual(semantics["HOLE"], SemanticType.HOLE)
+        self.assertEqual(
+            drawing.metadata["dimension_analysis"],
+            {
+                "unresolved_graphic_groups": 1,
+                "marker_entities": 2,
+                "dimension_line_entities": 1,
+                "extension_line_entities": 2,
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "dimension-graphics.dxf"
+            DxfExporter().export(build_cad_model(drawing), target)
+            document = ezdxf.readfile(target)
+            circle_layers = Counter(
+                entity.dxf.layer for entity in document.modelspace().query("CIRCLE")
+            )
+            line_layers = Counter(
+                entity.dxf.layer for entity in document.modelspace().query("LINE")
+            )
+        self.assertEqual(circle_layers, Counter({"DIMENSION": 2, "GEOMETRY": 1}))
+        self.assertEqual(line_layers, Counter({"DIMENSION": 3}))
 
     def test_closed_short_line_chain_is_reconstructed_as_circle(self) -> None:
         source = SourceEvidence("test", 1)
