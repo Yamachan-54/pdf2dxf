@@ -78,6 +78,7 @@ class ConversionPipeline:
         drawing = self.dimension_interpreter.analyze(drawing)
         drawing = self.sheet_analyzer.analyze(drawing)
         drawing = self.view_detector.detect(drawing)
+        drawing = self.dimension_interpreter.resolve(drawing)
         drawing = self.solver.solve(drawing)
         cad_model = build_cad_model(drawing)
         export_result = self.exporter.export(cad_model, destination)

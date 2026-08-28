@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from math import hypot
 import re
 
@@ -10,6 +11,28 @@ from ..ir.entities import (
     TextGeometry,
 )
 from ..geometry import Point
+
+
+@dataclass(frozen=True)
+class _DimensionCandidate:
+    group_id: str
+    first_id: str
+    axis: str
+    members: tuple[Entity, ...]
+    text: Entity
+    value: float
+    first_point: Point
+    second_point: Point
+    measured: float
+    ratio: float
+    view: str | None
+
+
+_STANDARD_MEASUREMENT_SCALES = (
+    0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 2.5, 3.0, 4.0, 5.0,
+    10.0, 20.0, 25.0, 50.0, 100.0,
+)
+_SCALE_RELATIVE_TOLERANCE = 0.01
 
 
 class DimensionInterpreter:
@@ -97,14 +120,21 @@ class DimensionInterpreter:
         dimension_texts = self._associate_dimension_texts(
             drawing, groups, by_id, page_scales
         )
-        promoted, unresolved_reasons = self._promote_native_dimensions(
-            drawing, groups, by_id
-        )
+        drawing.metadata["dimension_groups"] = [
+            {
+                "id": group_id,
+                "first_marker": first_id,
+                "second_marker": second_id,
+                "axis": axis,
+            }
+            for group_id, first_id, second_id, axis in groups
+        ]
 
         drawing.metadata["dimension_analysis"] = {
-            "native_dimension_entities": promoted,
-            "unresolved_graphic_groups": len(groups) - promoted,
-            "unresolved_reasons": unresolved_reasons,
+            "native_dimension_entities": 0,
+            "unresolved_graphic_groups": len(groups),
+            "unresolved_reasons": {},
+            "view_measurement_scales": {},
             "marker_entities": len(marker_groups),
             "dimension_line_entities": len(dimension_lines),
             "extension_line_entities": len(extension_lines),
@@ -112,97 +142,157 @@ class DimensionInterpreter:
         }
         return drawing
 
-    @staticmethod
-    def _promote_native_dimensions(
-        drawing: Drawing,
-        groups: list[tuple[str, str, str, str]],
-        by_id: dict[str, Entity],
-    ) -> tuple[int, dict[str, str]]:
-        """Promote only complete, unambiguous, 1:1 linear dimensions.
-
-        PDF coordinates describe paper space. A printed value must not become
-        native DIMENSION geometry until it agrees with the recovered
-        definition-point distance. Scaled views remain graphical dimensions
-        until view-scale inference is available.
-        """
-        promoted = 0
-        unresolved: dict[str, str] = {}
-        additions: list[Entity] = []
-        for group_id, first_id, second_id, axis in groups:
-            members = [
-                entity for entity in drawing.entities
-                if group_id in entity.metadata.get("dimension_graphics", [])
-            ]
-            texts = [
-                entity for entity in members
-                if entity.semantic_type == SemanticType.DIMENSION_TEXT
-            ]
-            if len(texts) != 1:
-                unresolved[group_id] = "dimension_text_not_single"
-                continue
-            value = texts[0].metadata.get("parsed_dimension_value")
-            if not isinstance(value, (int, float)) or value <= 0:
-                unresolved[group_id] = "dimension_text_not_numeric"
-                continue
-            if any(
-                entity.metadata.get("dimension_graphics") != [group_id]
-                for entity in members
-            ):
-                unresolved[group_id] = "shared_dimension_graphics"
-                continue
-
-            definition_points: list[Point] = []
-            for marker_id in (first_id, second_id):
-                candidates = _definition_points(by_id[marker_id], members)
-                if len(candidates) != 1:
-                    unresolved[group_id] = "definition_points_incomplete"
-                    break
-                definition_points.append(candidates[0])
-            if len(definition_points) != 2:
-                continue
-
-            measured = (
-                abs(definition_points[1].x - definition_points[0].x)
-                if axis == "H"
-                else abs(definition_points[1].y - definition_points[0].y)
+    def resolve(self, drawing: Drawing) -> Drawing:
+        """Promote dimensions after View detection and infer safe view scales."""
+        raw_groups = drawing.metadata.get("dimension_groups", [])
+        groups = [
+            (
+                str(group["id"]), str(group["first_marker"]),
+                str(group["second_marker"]), str(group["axis"]),
             )
-            tolerance = max(0.1, float(value) * 0.01)
-            if abs(measured - float(value)) > tolerance:
-                unresolved[group_id] = "paper_measurement_differs_from_text"
+            for group in raw_groups
+            if isinstance(group, dict)
+        ]
+        by_id = {entity.id: entity for entity in drawing.entities}
+        candidates: dict[str, _DimensionCandidate] = {}
+        unresolved: dict[str, str] = {}
+        for group in groups:
+            candidate, reason = self._dimension_candidate(drawing, group, by_id)
+            if candidate is None:
+                unresolved[group[0]] = reason
+            else:
+                candidates[candidate.group_id] = candidate
+
+        scale_support: dict[tuple[str, float], list[_DimensionCandidate]] = defaultdict(list)
+        if drawing.unit == "mm":
+            for candidate in candidates.values():
+                if candidate.view is None or _relative_error(candidate.ratio, 1.0) <= _SCALE_RELATIVE_TOLERANCE:
+                    continue
+                standard = min(
+                    _STANDARD_MEASUREMENT_SCALES,
+                    key=lambda value: _relative_error(candidate.ratio, value),
+                )
+                if _relative_error(candidate.ratio, standard) <= _SCALE_RELATIVE_TOLERANCE:
+                    scale_support[(candidate.view, standard)].append(candidate)
+
+        view_scales: dict[str, float] = {}
+        view_scale_debug: dict[str, dict[str, object]] = {}
+        views = {view for view, _scale in scale_support}
+        for view in views:
+            qualified = [
+                (scale, supported)
+                for (candidate_view, scale), supported in scale_support.items()
+                if candidate_view == view and len(supported) >= 2
+            ]
+            if len(qualified) != 1:
+                continue
+            scale, supported = qualified[0]
+            view_scales[view] = scale
+            view_scale_debug[view] = {
+                "factor": scale,
+                "support_groups": [candidate.group_id for candidate in supported],
+                "observed_ratios": [candidate.ratio for candidate in supported],
+            }
+
+        promoted = 0
+        additions: list[Entity] = []
+        for group_id, candidate in candidates.items():
+            if _relative_error(candidate.ratio, 1.0) <= _SCALE_RELATIVE_TOLERANCE:
+                measurement_scale = 1.0
+            elif candidate.view in view_scales:
+                measurement_scale = view_scales[candidate.view]
+            else:
+                unresolved[group_id] = "view_scale_not_confirmed"
+                continue
+            if _relative_error(candidate.ratio, measurement_scale) > _SCALE_RELATIVE_TOLERANCE:
+                unresolved[group_id] = "dimension_scale_inconsistent"
                 continue
 
-            first_marker = by_id[first_id].geometry
+            first_marker = by_id[candidate.first_id].geometry
             assert isinstance(first_marker, CircleGeometry)
-            references = tuple(entity.id for entity in members)
             dimension_id = f"NATIVE_{group_id}"
             additions.append(
                 Entity(
                     dimension_id, "dimension",
                     DimensionGeometry(
-                        "linear", float(value), references,
-                        orientation="horizontal" if axis == "H" else "vertical",
-                        first_point=definition_points[0],
-                        second_point=definition_points[1],
+                        "linear", candidate.value,
+                        tuple(entity.id for entity in candidate.members),
+                        orientation="horizontal" if candidate.axis == "H" else "vertical",
+                        first_point=candidate.first_point,
+                        second_point=candidate.second_point,
                         dimension_line_point=first_marker.center,
-                        angle=0.0 if axis == "H" else 90.0,
+                        angle=0.0 if candidate.axis == "H" else 90.0,
+                        measurement_scale=measurement_scale,
                     ),
                     SemanticType.DIMENSION_LINE,
-                    confidence=min(entity.confidence for entity in members),
-                    page=by_id[first_id].page,
+                    view=candidate.view,
+                    confidence=min(entity.confidence for entity in candidate.members),
+                    page=by_id[candidate.first_id].page,
                     metadata={
                         "semantic_evidence": "resolved_linear_dimension",
                         "dimension_graphic": group_id,
-                        "dimension_text_entity": texts[0].id,
-                        "paper_measurement": measured,
+                        "dimension_text_entity": candidate.text.id,
+                        "paper_measurement": candidate.measured,
+                        "measurement_scale": measurement_scale,
                     },
                 )
             )
-            for entity in members:
+            for entity in candidate.members:
                 entity.metadata["resolved_dimension"] = dimension_id
                 entity.metadata["suppress_cad_export"] = True
             promoted += 1
         drawing.entities.extend(additions)
-        return promoted, unresolved
+        analysis = drawing.metadata.setdefault("dimension_analysis", {})
+        analysis["native_dimension_entities"] = promoted
+        analysis["unresolved_graphic_groups"] = len(groups) - promoted
+        analysis["unresolved_reasons"] = unresolved
+        analysis["view_measurement_scales"] = view_scale_debug
+        return drawing
+
+    @staticmethod
+    def _dimension_candidate(
+        drawing: Drawing,
+        group: tuple[str, str, str, str],
+        by_id: dict[str, Entity],
+    ) -> tuple[_DimensionCandidate | None, str]:
+        group_id, first_id, second_id, axis = group
+        members = tuple(
+            entity for entity in drawing.entities
+            if group_id in entity.metadata.get("dimension_graphics", [])
+        )
+        texts = [
+            entity for entity in members
+            if entity.semantic_type == SemanticType.DIMENSION_TEXT
+        ]
+        if len(texts) != 1:
+            return None, "dimension_text_not_single"
+        value = texts[0].metadata.get("parsed_dimension_value")
+        if not isinstance(value, (int, float)) or value <= 0:
+            return None, "dimension_text_not_numeric"
+        if any(
+            entity.metadata.get("dimension_graphics") != [group_id]
+            for entity in members
+        ):
+            return None, "shared_dimension_graphics"
+        points: list[Point] = []
+        for marker_id in (first_id, second_id):
+            definition_points = _definition_points(by_id[marker_id], list(members))
+            if len(definition_points) != 1:
+                return None, "definition_points_incomplete"
+            points.append(definition_points[0])
+        measured = (
+            abs(points[1].x - points[0].x)
+            if axis == "H" else abs(points[1].y - points[0].y)
+        )
+        if measured <= 1e-12:
+            return None, "definition_points_coincident"
+        first_view = by_id[first_id].view
+        second_view = by_id[second_id].view
+        view = first_view if first_view == second_view else None
+        return _DimensionCandidate(
+            group_id, first_id, axis, members, texts[0], float(value),
+            points[0], points[1], measured, float(value) / measured, view,
+        ), ""
 
     @staticmethod
     def _associate_dimension_texts(
@@ -417,6 +507,10 @@ def _definition_points(marker: Entity, members: list[Entity]) -> list[Point]:
             continue
         points.append(geometry.end if start_distance < end_distance else geometry.start)
     return points
+
+
+def _relative_error(observed: float, expected: float) -> float:
+    return abs(observed - expected) / max(abs(expected), 1e-12)
 
 
 def _looks_like_dimension_text(text: str) -> bool:

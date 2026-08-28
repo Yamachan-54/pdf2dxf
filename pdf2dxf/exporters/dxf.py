@@ -67,6 +67,10 @@ def safe_layer_name(name: str) -> str:
     return cleaned or "0"
 
 
+def _dimension_text(value: float | None) -> str:
+    return "<>" if value is None else format(value, ".12g")
+
+
 @dataclass(frozen=True)
 class LayerPolicy:
     include_view_prefix: bool = False
@@ -222,8 +226,10 @@ class _EntityWriter:
             base=(entity.dimension_line_point.x, entity.dimension_line_point.y),
             p1=(entity.first_point.x, entity.first_point.y),
             p2=(entity.second_point.x, entity.second_point.y),
+            text=_dimension_text(entity.value),
             angle=entity.angle,
             dimstyle=self.config.dimension_style,
+            override={"dimlfac": entity.measurement_scale},
             dxfattribs=attributes,
         )
         dimension.render()

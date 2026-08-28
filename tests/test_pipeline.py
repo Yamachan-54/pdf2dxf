@@ -363,7 +363,8 @@ class PipelineTests(unittest.TestCase):
         )
 
         drawing = SemanticClassifier().classify(drawing)
-        drawing = DimensionInterpreter().analyze(drawing)
+        interpreter = DimensionInterpreter()
+        drawing = interpreter.resolve(interpreter.analyze(drawing))
 
         semantics = {entity.id: entity.semantic_type for entity in drawing.entities}
         self.assertEqual(semantics["M1"], SemanticType.DIMENSION_MARKER)
@@ -396,6 +397,7 @@ class PipelineTests(unittest.TestCase):
                 "unresolved_reasons": {
                     "DIMENSION_GRAPHIC_001": "dimension_text_not_single",
                 },
+                "view_measurement_scales": {},
                 "marker_entities": 2,
                 "dimension_line_entities": 1,
                 "extension_line_entities": 2,
@@ -455,8 +457,9 @@ class PipelineTests(unittest.TestCase):
             ],
         )
 
-        drawing = DimensionInterpreter().analyze(
-            SemanticClassifier().classify(drawing)
+        interpreter = DimensionInterpreter()
+        drawing = interpreter.resolve(
+            interpreter.analyze(SemanticClassifier().classify(drawing))
         )
 
         native = [
@@ -479,6 +482,133 @@ class PipelineTests(unittest.TestCase):
             self.assertFalse(document.audit().has_errors)
             self.assertEqual(len(document.modelspace().query("DIMENSION")), 1)
             self.assertEqual(len(document.modelspace().query("CIRCLE LINE TEXT")), 0)
+
+    def test_two_dimensions_in_one_view_confirm_three_to_one_scale(self) -> None:
+        marker_metadata = {
+            "reconstruction": "circle_from_lines",
+            "source_entities": [f"S{index}" for index in range(20)],
+        }
+        entities = []
+        for prefix, y, end_x, text in (
+            ("A", 40.0, 100.0, "300"),
+            ("B", 90.0, 50.0, "150"),
+        ):
+            entities.extend(
+                [
+                    Entity(
+                        f"{prefix}_M1", "circle", CircleGeometry(Point(0, y), 0.5),
+                        page=1, metadata=dict(marker_metadata),
+                    ),
+                    Entity(
+                        f"{prefix}_M2", "circle", CircleGeometry(Point(end_x, y), 0.5),
+                        page=1, metadata=dict(marker_metadata),
+                    ),
+                    Entity(
+                        f"{prefix}_DIM", "line",
+                        LineGeometry(Point(0.5, y), Point(end_x - 0.5, y)), page=1,
+                    ),
+                    Entity(
+                        f"{prefix}_EXT1", "line",
+                        LineGeometry(Point(0, y + 0.5), Point(0, y + 10)), page=1,
+                    ),
+                    Entity(
+                        f"{prefix}_EXT2", "line",
+                        LineGeometry(Point(end_x, y + 0.5), Point(end_x, y + 10)), page=1,
+                    ),
+                    Entity(
+                        f"{prefix}_TEXT", "text",
+                        TextGeometry(text, Point(end_x / 2 - 3, y + 1), 2, width=6),
+                        page=1,
+                    ),
+                ]
+            )
+        drawing = Drawing(
+            "mm", sheets=[Sheet("SHEET_001", 1, (-10, 0, 200, 200))],
+            entities=entities,
+        )
+        interpreter = DimensionInterpreter()
+        drawing = interpreter.analyze(SemanticClassifier().classify(drawing))
+        for entity in drawing.entities:
+            if entity.semantic_type != SemanticType.DIMENSION_TEXT:
+                entity.view = "VIEW_001"
+        drawing = interpreter.resolve(drawing)
+
+        native = [
+            entity for entity in drawing.entities
+            if isinstance(entity.geometry, DimensionGeometry)
+        ]
+        self.assertEqual(len(native), 2)
+        self.assertEqual({entity.geometry.measurement_scale for entity in native}, {3.0})
+        scale = drawing.metadata["dimension_analysis"]["view_measurement_scales"]["VIEW_001"]
+        self.assertEqual(scale["factor"], 3.0)
+        self.assertEqual(len(scale["support_groups"]), 2)
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "scaled-dimensions.dxf"
+            DxfExporter().export(build_cad_model(drawing), target)
+            document = ezdxf.readfile(target)
+            self.assertFalse(document.audit().has_errors)
+            dimensions = list(document.modelspace().query("DIMENSION"))
+            self.assertEqual(len(dimensions), 2)
+            rendered_text = {
+                entity.dxf.text
+                for dimension in dimensions
+                for entity in document.blocks.get(dimension.dxf.geometry)
+                if entity.dxftype() in {"TEXT", "MTEXT"}
+            }
+            self.assertEqual(rendered_text, {"150", "300"})
+
+    def test_one_scaled_dimension_does_not_confirm_view_scale(self) -> None:
+        marker_metadata = {
+            "reconstruction": "circle_from_lines",
+            "source_entities": [f"S{index}" for index in range(20)],
+        }
+        drawing = Drawing(
+            "mm", sheets=[Sheet("SHEET_001", 1, (0, 0, 200, 200))],
+            entities=[
+                Entity(
+                    "M1", "circle", CircleGeometry(Point(20, 50), 0.5),
+                    page=1, metadata=dict(marker_metadata),
+                ),
+                Entity(
+                    "M2", "circle", CircleGeometry(Point(120, 50), 0.5),
+                    page=1, metadata=dict(marker_metadata),
+                ),
+                Entity(
+                    "DIM", "line", LineGeometry(Point(20.5, 50), Point(119.5, 50)),
+                    page=1,
+                ),
+                Entity(
+                    "EXT1", "line", LineGeometry(Point(20, 50.5), Point(20, 70)),
+                    page=1,
+                ),
+                Entity(
+                    "EXT2", "line", LineGeometry(Point(120, 50.5), Point(120, 70)),
+                    page=1,
+                ),
+                Entity(
+                    "TEXT", "text", TextGeometry("300", Point(67, 52), 2, width=6),
+                    page=1,
+                ),
+            ],
+        )
+        interpreter = DimensionInterpreter()
+        drawing = interpreter.analyze(SemanticClassifier().classify(drawing))
+        for entity in drawing.entities:
+            if entity.semantic_type != SemanticType.DIMENSION_TEXT:
+                entity.view = "VIEW_001"
+        drawing = interpreter.resolve(drawing)
+
+        self.assertFalse(
+            any(isinstance(entity.geometry, DimensionGeometry) for entity in drawing.entities)
+        )
+        analysis = drawing.metadata["dimension_analysis"]
+        self.assertEqual(analysis["native_dimension_entities"], 0)
+        self.assertEqual(analysis["view_measurement_scales"], {})
+        self.assertEqual(
+            analysis["unresolved_reasons"]["DIMENSION_GRAPHIC_001"],
+            "view_scale_not_confirmed",
+        )
 
     def test_tesseract_tsv_is_mapped_to_sheet_text_geometry(self) -> None:
         tsv = (
@@ -611,6 +741,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(modelspace.query("MTEXT").first.dxf.attachment_point, 1)
             self.assertEqual(modelspace.query("MTEXT").first.plain_text(), "A\nB")
             self.assertEqual(modelspace.query("DIMENSION").first.dxf.layer, "DIMENSION")
+            self.assertEqual(modelspace.query("DIMENSION").first.dxf.text, "10")
             self.assertEqual(document.layers.get("CENTER").dxf.linetype.upper(), "CENTER")
             self.assertEqual(document.layers.get("HIDDEN").dxf.linetype.upper(), "HIDDEN")
             center_line = next(entity for entity in modelspace.query("LINE") if entity.dxf.layer == "CENTER")

@@ -133,10 +133,12 @@ major drawing views. With optional English OCR it also verifies editable TEXT
 output and associates nearby numeric/variable tokens with graphical dimensions.
 Paired dot-ended graphical dimensions are separated onto the DIMENSION layer,
 while unmatched analytic circles remain manufacturing-hole candidates. A
-linear dimension is promoted only when both definition points, one numeric OCR
-token and a matching 1:1 paper measurement are available. The tracked sample's
-printed values reveal scaled views, so those groups intentionally remain
-graphical until view-scale inference is implemented.
+linear dimension is promoted only when both definition points and one numeric
+OCR token are available. A 1:1 dimension can stand alone. A scaled dimension
+requires at least two independent candidates in the same View to support one
+standard measurement factor within 1%. The tracked sample establishes factor
+3.0 for `VIEW_004`, promoting the `454` and `455` dimensions while retaining
+ambiguous groups as graphics.
 
 ## 13. Dependencies
 
@@ -167,9 +169,10 @@ electronic-PDF path.
   paths.
 - Semantic-to-layer mapping exists only in the exporter, which is the correct
   dependency direction.
-- `DimensionGeometry` holds resolved definition points and the dimension-line
-  location. Unresolved graphical dimensions stay as semantic source entities;
-  HATCH and BLOCK/INSERT CAD models do not yet exist.
+- `DimensionGeometry` holds resolved definition points, the dimension-line
+  location, and an ezdxf-independent measurement scale. The exporter maps that
+  scale to DXF `DIMLFAC`. Unresolved graphical dimensions stay as semantic
+  source entities; HATCH and BLOCK/INSERT CAD models do not yet exist.
 
 ### Impact and migration plan
 
@@ -202,5 +205,6 @@ The normal path now uses `DxfExporter -> ezdxf -> DXF`. The generic
 R2000 remains the centralized default and `$INSUNITS` comes from `CadModel.unit`.
 The legacy ASCII writer was removed after round-trip tests replaced its final
 compatibility test. Resolved linear dimensions can be emitted as native
-DIMENSION; unresolved source graphics are retained and recorded with a reason. HATCH,
+DIMENSION with an explicit recognized value and measurement scale; unresolved
+source graphics are retained and recorded with a reason. HATCH,
 BLOCK, and INSERT remain future CAD model additions.

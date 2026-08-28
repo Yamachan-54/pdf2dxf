@@ -168,7 +168,8 @@ DXF Versionは広い互換性とネイティブEntity対応のバランスから
 - 塗りつぶし、線種、線幅、クリッピングマスクはDXFへ保持せず、輪郭線を出力します。
 - 意味分類は保守的な初期ルールです。投影図種別、寸法解釈、View間Feature対応、Constraint Solverは今後のPhaseです。
 - 分割線からの中心線認識は、軸平行・等間隔・長短交互の明確なパターンだけを対象とします。斜め中心線など不確実なものは形状線のまま残します。
-- 両側の定義点、単一の数値文字、紙面上の実測値との一致が揃った等倍の線形寸法だけをネイティブ `DIMENSION`へ変換します。情報不足・縮尺不明の寸法は誤ったEntityを作らず、Drawing IRの`dimension_analysis.unresolved_reasons`へ理由を記録します。
+- 両側の定義点と単一の数値文字が揃った線形寸法をネイティブ `DIMENSION`へ変換します。等倍寸法は単独で、縮尺寸法は同一View内の独立した2寸法以上が同じ標準倍率を1%以内で支持した場合だけ昇格します。
+- 推定倍率は中立なCAD Model属性として保持し、DXF Exporter境界でezdxfの`DIMLFAC`へ変換します。情報不足・縮尺不明の寸法はDrawing IRの`dimension_analysis.unresolved_reasons`へ理由を記録します。現在の自動縮尺推定は主要用途のmm出力に限定しています。
 - 文字値を復元できない寸法図形でも、同径小円のペア、点間の線、直交する補助線をそれぞれ `dimension_marker`、`dimension_line`、`dimension_extension_line` としてDrawing IRに保持し、`DIMENSION` Layerへ分離します。この段階では推測したネイティブ `DIMENSION` Entityにはしません。
 - OCR文字が寸法図形の近傍にあり、数値・直径記号・`W2`等の限定パターンに一致する場合は`dimension_text`へ分類します。分割OCR文字は誤結合せず未解決のまま残します。
 - Git不要Windowsインストーラーは、利用者が指定した64-bit Tesseractバンドルを検証して自己完結インストールへ取り込めます。Tesseract配布物自体はリポジトリに同梱しません。
@@ -185,6 +186,6 @@ python -m unittest discover -s tests -v
 
 テストでは生成した電子PDFを使い、LINE、CIRCLE、ARC、TEXT、MTEXT、DIMENSION、
 意味レイヤー、CENTER/HIDDEN LineType、mm/inch/pt単位、図面枠/表題欄分離、
-回転ページ座標、ゼロ長線除外、分割中心線、寸法図形と加工形状の分離、安全条件付きネイティブ寸法昇格、OCR座標変換・信頼度フィルター、高密度View分離、
+回転ページ座標、ゼロ長線除外、分割中心線、寸法図形と加工形状の分離、View縮尺付きネイティブ寸法昇格、OCR座標変換・信頼度フィルター、高密度View分離、
 Drawing IR JSON、Debug出力、既存CLI互換性を検証します。DXFはezdxfで再読込し、
 監査とEntity単位のラウンドトリップ検証を行います。
